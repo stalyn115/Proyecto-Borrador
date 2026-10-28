@@ -13,7 +13,7 @@ import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -102,6 +102,12 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str
     usuario: dict
+
+
+class LoginRequest(BaseModel):
+    """Login vía JSON — usado por la app móvil."""
+    username: str
+    password: str
 
 
 class AsistenciaQR(BaseModel):
@@ -243,22 +249,35 @@ def raiz():
 
 # ── POST /login ──────────────────────────────────────────────────────────────
 @app.post("/login", response_model=TokenResponse, tags=["Auth"])
-def login(form: OAuth2PasswordRequestForm = Depends()):
+async def login(
+    # JSON body (app móvil)
+    data: LoginRequest | None = None,
+    # Form urlencoded (swagger / sistema escritorio)
+    username: str | None = Form(default=None),
+    password: str | None = Form(default=None),
+):
     """
     Autenticación con usuario y contraseña.
+    Acepta JSON  → { "username": "...", "password": "..." }
+    Acepta Form  → username=...&password=...
     Devuelve JWT Bearer token.
-    Compatible con el hash SHA-256 del sistema de escritorio.
     """
+    # Resolver credenciales según el formato recibido
+    user = (data.username if data else username) or ""
+    pwd  = (data.password if data else password) or ""
+
+    if not user or not pwd:
+        raise HTTPException(status_code=422, detail="username y password son requeridos")
+
     conn = get_conn(); c = conn.cursor()
     c.execute("""SELECT id, username, rol, nombre, password
-                 FROM usuarios WHERE username=?""", (form.username,))
+                 FROM usuarios WHERE username=?""", (user,))
     row = c.fetchone(); conn.close()
 
     if not row:
         raise HTTPException(status_code=401, detail="Usuario no encontrado")
 
-    # Verificar con werkzeug (pbkdf2) o SHA-256 legacy
-    if not verificar_pwd(form.password, row["password"]):
+    if not verificar_pwd(pwd, row["password"]):
         raise HTTPException(status_code=401, detail="Contraseña incorrecta")
 
     token = crear_token({
