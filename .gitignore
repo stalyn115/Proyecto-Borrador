@@ -7,3 +7,6 @@ reportes/
 app_aguarico_movil/build/
 app_aguarico_movil/.dart_tool/
 app_aguarico_movil/.gradle/
+*.zip
+venv/
+*.bak

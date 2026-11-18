@@ -1,0 +1,104 @@
+ESTE ARCHIVO ES UNA LLUVIA DE IDEAS , NO MODIFICAR
+
+
+Aplicacion para taxistas00
+
+
+
+arquitectura de programacion orientada a objetos
+
+
+
+
+
+
+Aplicacion de base de datos para taxis
+
+la aplicacion sera de codigo abierto y publico
+
+
+El proyecto consiste en un programa matriz quien gestiona las aplicaciones APK 
+
+
+en android la aplicacion esta oculta\
+
+
+
+
+
+para conectar no es necesario dar aviso a la matriz
+para desconectar la aplicacion , se debe dar aviso a la matriz la cual es la unica autorizada
+
+
+
+
+
+
+
+
+
+los taxistas se descargan una aplicacion mobil para su seguridad que rastrea su ubicacion GPS en todo momento y existe un boton de peligro en la aplicacion que automaticamente hara el actuar correspondiente a la ley como llamar al 911
+En la aplicacion apk Tambien existira un boton de conexion y desconexion 
+
+en momento de peligro la aplicacion bloquea las funcionalidades del telefono (mientras se informa al programa matriz)
+adicionalmente un dispositivo tipo chip para el auto en caso de que algo suceda con el telefono, mantener la ubicacion gps
+adicional en el radio del auto se podra instalar la aplicacion para asegurar que no exista perdida del vehiculo 
+
+
+
+Porque tener la aplicacion en el celular y el radio 
+porque no todos los autos tienen radios con android
+en caso de que algo suceda con el celular se tiene el respaldo en la radio  
+
+
+
+
+
+aumentar impression de historial 
+
+
+
+
+Desarrollar un peque;o boton de alerta para estar oculto en el vehiculo para activar el sistema de emergencia 
+
+
+
+
+
+
+
+
+FUNCIONALIDADES APLICACION ANDROID
+
+GPS
+CONECTAR - DESCONECTAR
+boton de Emergencia 
+Aplicacion en modo oculto
+Bloquear funcionalidades del telefono 
+
+
+
+
+
+FUNCIONALIDADES PROGRMA MATRIZ
+guardar datos
+funcionalidad de emergencia y rastreo
+Mandar alertas a grupos de WhatsApp de uber y taxistas automaticamente
+
+
+
+
+
+
+
+
+
+
+
+
+
+PARA LA CASA ABIERTA
+
+
+
+

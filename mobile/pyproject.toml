@@ -1,0 +1,14 @@
+[project]
+name = "aguarico_v6"
+version = "6.0.0"
+description = "App Móvil Agrupación Aguarico v6"
+dependencies = [
+    "flet>=1.0.0",
+    "requests>=2.31.0",
+]
+
+[tool.flet]
+org = "com.aguarico"
+product = "Aguarico v6"
+company = "Agrupación Aguarico"
+copyright = "Copyright 2026 Agrupación Aguarico"

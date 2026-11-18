@@ -10,7 +10,10 @@ import sqlite3
 import shutil
 import webbrowser
 import urllib.parse
+import urllib.request
 import hashlib
+import socket
+import threading
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -22,15 +25,58 @@ try:
 except ImportError:
     PIL_OK = False
 
-# ── Carpetas ─────────────────────────────────────────────────────────────────
-DB         = "aguarico_v6.db"
-DIR_FOTOS  = "fotos"
-DIR_VEH    = "vehiculos_fotos"
-DIR_DOCS   = "documentos_sanciones"
-DIR_VENTAS = "documentos_ventas"
-DIR_REP    = "reportes"
+# ── ReportLab (PDF) opcional ─────────────────────────────────────────────────
+try:
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                    Paragraph, Spacer, HRFlowable)
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    REPORTLAB_OK = True
+except ImportError:
+    REPORTLAB_OK = False
 
-for _d in (DIR_FOTOS, DIR_VEH, DIR_DOCS, DIR_VENTAS, DIR_REP):
+# ── OpenCV + pyzbar (QR scan) opcionales ────────────────────────────────────
+try:
+    import cv2
+    CV2_OK = True
+except ImportError:
+    CV2_OK = False
+
+try:
+    from pyzbar import pyzbar as _pyzbar_mod
+    # Verificar que la DLL nativa carga correctamente
+    import numpy as _np_test
+    _pyzbar_mod.decode(_np_test.zeros((10, 10, 3), dtype=_np_test.uint8))
+    PYZBAR_OK = True
+    del _np_test
+except Exception:
+    PYZBAR_OK = False
+
+# Si opencv está disponible usamos su QRCodeDetector como fallback de pyzbar
+# cv2.QRCodeDetector no necesita DLLs externas
+CV2_QR_OK = CV2_OK  # cv2.QRCodeDetector siempre disponible con opencv
+
+# ── qrcode (generación QR) opcional ─────────────────────────────────────────
+try:
+    import qrcode as qrcode_lib
+    QRCODE_OK = True
+except ImportError:
+    QRCODE_OK = False
+
+# ── Carpetas ─────────────────────────────────────────────────────────────────
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+DB         = os.path.join(BASE_DIR, "aguarico_v6.db")
+DIR_FOTOS  = os.path.join(BASE_DIR, "fotos")
+DIR_VEH    = os.path.join(BASE_DIR, "vehiculos_fotos")
+DIR_DOCS   = os.path.join(BASE_DIR, "documentos_sanciones")
+DIR_VENTAS = os.path.join(BASE_DIR, "documentos_ventas")
+DIR_REP    = os.path.join(BASE_DIR, "reportes")
+DIR_QR     = os.path.join(BASE_DIR, "qr_codes")
+
+for _d in (DIR_FOTOS, DIR_VEH, DIR_DOCS, DIR_VENTAS, DIR_REP, DIR_QR):
     os.makedirs(_d, exist_ok=True)
 
 # ── Paleta ───────────────────────────────────────────────────────────────────
@@ -54,8 +100,35 @@ FS       = ("Segoe UI", 8)
 # ════════════════════════════════════════════════════════════════════════════
 # SEGURIDAD
 # ════════════════════════════════════════════════════════════════════════════
-def hash_pwd(pwd: str) -> str:
+try:
+    from werkzeug.security import generate_password_hash, check_password_hash
+    WERKZEUG_OK = True
+except ImportError:
+    WERKZEUG_OK = False
+
+
+def hash_pwd_sha(pwd: str) -> str:
+    """Hash SHA-256 legacy."""
     return hashlib.sha256(pwd.encode()).hexdigest()
+
+
+def hash_pwd(pwd: str) -> str:
+    """Genera hash con Werkzeug (scrypt/pbkdf2) o SHA-256 si Werkzeug no está disponible."""
+    if WERKZEUG_OK:
+        return generate_password_hash(pwd)
+    return hash_pwd_sha(pwd)
+
+
+def verificar_pwd(pwd: str, hashed: str) -> bool:
+    """Verifica contraseña soportando Werkzeug (scrypt, pbkdf2), SHA-256 legacy y texto plano."""
+    if not hashed or not pwd:
+        return False
+    if WERKZEUG_OK and (hashed.startswith('pbkdf2:') or hashed.startswith('scrypt:') or hashed.startswith('argon2:')):
+        try:
+            return check_password_hash(hashed, pwd)
+        except Exception:
+            pass
+    return (hashed == hash_pwd_sha(pwd)) or (hashed == pwd)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -161,9 +234,9 @@ def init_db():
     # Usuarios iniciales
     if not c.execute("SELECT id FROM usuarios LIMIT 1").fetchone():
         c.execute("INSERT INTO usuarios(username,password,rol,nombre) VALUES(?,?,?,?)",
-                  ("admin",    hash_pwd("admin123"),      "Administrador", "Adm. Tnte. J. Paredes"))
+                  ("admin",    hash_pwd("1234"),          "Administrador", "Adm. Tnte. J. Paredes"))
         c.execute("INSERT INTO usuarios(username,password,rol,nombre) VALUES(?,?,?,?)",
-                  ("staly",    hash_pwd("staly123"),      "Administrador", "Staly Aguarico"))
+                  ("staly",    hash_pwd("1234"),          "Administrador", "Staly Aguarico"))
         c.execute("INSERT INTO usuarios(username,password,rol,nombre) VALUES(?,?,?,?)",
                   ("aguarico", hash_pwd("aguarico2024"),  "Operador",      "Operador Aguarico"))
 
@@ -270,6 +343,277 @@ def ask_string(parent, title, prompt):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# IP LOCAL Y ESTADO DE API
+# ════════════════════════════════════════════════════════════════════════════
+def get_ip_local() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def check_api_disponible(url: str = "http://127.0.0.1:8000/") -> bool:
+    try:
+        req = urllib.request.urlopen(url, timeout=1)
+        return req.status == 200
+    except Exception:
+        return False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# GENERACIÓN DE CÓDIGO QR
+# ════════════════════════════════════════════════════════════════════════════
+def generar_qr_socio(socio_id=None, cedula="", codigo_puesto="", nombre=""):
+    """
+    Genera un QR para el socio con el formato:  AGUARICO|cedula|codigo_puesto
+    Devuelve la ruta del archivo PNG generado, o "" si falla.
+    """
+    if not QRCODE_OK:
+        messagebox.showerror("QR no disponible",
+            "Instala qrcode:\n  pip install qrcode[pil]")
+        return ""
+    if not cedula and not codigo_puesto:
+        messagebox.showwarning("Datos insuficientes",
+            "El socio necesita cédula o código de puesto para generar QR.")
+        return ""
+
+    contenido = f"AGUARICO|{cedula}|{codigo_puesto}"
+    nombre_limpio = nombre.replace(" ", "_").replace("/", "-")[:40]
+    archivo = os.path.join(DIR_QR, f"QR_{codigo_puesto}_{nombre_limpio}.png")
+
+    try:
+        qr = qrcode_lib.QRCode(
+            version=2,
+            error_correction=qrcode_lib.constants.ERROR_CORRECT_H,
+            box_size=8,
+            border=3,
+        )
+        qr.add_data(contenido)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+
+        # Agregar texto debajo del QR
+        if PIL_OK:
+            from PIL import ImageDraw, ImageFont
+            qr_w, qr_h = img.size
+            extra = 50
+            final = Image.new("RGB", (qr_w, qr_h + extra), "white")
+            final.paste(img, (0, 0))
+            draw = ImageDraw.Draw(final)
+            try:
+                font = ImageFont.truetype("arial.ttf", 14)
+            except Exception:
+                font = ImageFont.load_default()
+            texto = f"{codigo_puesto} — {nombre[:30]}"
+            text_w = draw.textlength(texto, font=font) if hasattr(draw, "textlength") else len(texto) * 8
+            draw.text(((qr_w - text_w) / 2, qr_h + 5), texto, fill="black", font=font)
+            draw.text(((qr_w - text_w) / 2, qr_h + 24), cedula, fill="#555555", font=font)
+            final.save(archivo)
+        else:
+            img.save(archivo)
+
+        return archivo
+    except Exception as ex:
+        messagebox.showerror("Error QR", f"No se pudo generar el QR:\n{ex}")
+        return ""
+
+
+def parsear_qr(contenido: str):
+    """
+    Parsea el contenido del QR. Formato: AGUARICO|cedula|codigo_puesto
+    Devuelve dict con 'cedula' y 'codigo_puesto', o None si no es válido.
+    """
+    partes = contenido.strip().split("|")
+    if len(partes) == 3 and partes[0] == "AGUARICO":
+        return {"cedula": partes[1], "codigo_puesto": partes[2]}
+    # Fallback: si alguien tipea solo la cédula
+    if contenido.strip().isdigit() and len(contenido.strip()) >= 8:
+        return {"cedula": contenido.strip(), "codigo_puesto": ""}
+    return None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# EXPORTAR PDF DE ASISTENCIA
+# ════════════════════════════════════════════════════════════════════════════
+def exportar_pdf_asistencia(parent_win, usuario_nombre,
+                             fecha_desde="", fecha_hasta="",
+                             socio_id=None, socio_nombre="Todos"):
+    """
+    Genera un PDF de asistencia con filtro por rango de fechas y/o socio.
+    Retorna la ruta del PDF generado.
+    """
+    if not REPORTLAB_OK:
+        messagebox.showerror("ReportLab no disponible",
+            "Instala reportlab:\n  pip install reportlab")
+        return ""
+
+    # ── Consulta ──────────────────────────────────────────────────────────
+    conn = get_conn(); c = conn.cursor()
+
+    sql = """SELECT a.codigo_puesto, a.nombre_socio, a.fecha,
+                    a.hora_entrada, a.hora_salida, a.estado,
+                    a.registrado_por, a.observacion
+             FROM asistencias a
+             WHERE 1=1"""
+    params = []
+
+    if fecha_desde:
+        # Convertir dd/mm/yyyy a sqlite comparable  yyyy-mm-dd no funciona
+        # usamos comparación de texto con formato guardado dd/mm/yyyy
+        params.append(fecha_desde)
+        sql += " AND a.fecha >= ?"
+    if fecha_hasta:
+        params.append(fecha_hasta)
+        sql += " AND a.fecha <= ?"
+    if socio_id:
+        params.append(socio_id)
+        sql += " AND a.socio_id = ?"
+
+    sql += " ORDER BY a.fecha ASC, a.hora_entrada ASC"
+    c.execute(sql, params)
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        messagebox.showinfo("Sin datos",
+            "No hay registros de asistencia con esos filtros.")
+        return ""
+
+    # ── Archivo ───────────────────────────────────────────────────────────
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nombre_archivo = os.path.join(DIR_REP, f"Asistencia_{ts}.pdf")
+
+    doc = SimpleDocTemplate(
+        nombre_archivo,
+        pagesize=landscape(A4),
+        rightMargin=1.5*cm, leftMargin=1.5*cm,
+        topMargin=1.5*cm, bottomMargin=1.5*cm
+    )
+
+    estilos = getSampleStyleSheet()
+    st_titulo = ParagraphStyle("titulo",
+        fontSize=18, fontName="Helvetica-Bold",
+        alignment=TA_CENTER, textColor=colors.HexColor("#0f2746"),
+        spaceAfter=4)
+    st_sub = ParagraphStyle("sub",
+        fontSize=11, fontName="Helvetica",
+        alignment=TA_CENTER, textColor=colors.HexColor("#1a73e8"),
+        spaceAfter=2)
+    st_info = ParagraphStyle("info",
+        fontSize=9, fontName="Helvetica",
+        alignment=TA_CENTER, textColor=colors.grey,
+        spaceAfter=10)
+    st_pie = ParagraphStyle("pie",
+        fontSize=8, fontName="Helvetica",
+        alignment=TA_CENTER, textColor=colors.grey)
+
+    elementos = []
+
+    # ── Encabezado ────────────────────────────────────────────────────────
+    elementos.append(Paragraph("ASO AGUARICO", st_titulo))
+    elementos.append(Paragraph("AGRUPACIÓN AUTOMOVILÍSTICA AGUARICO", st_sub))
+    elementos.append(Paragraph("REPORTE DE ASISTENCIA", st_sub))
+    elementos.append(HRFlowable(width="100%", thickness=2,
+                                color=colors.HexColor("#1a73e8"), spaceAfter=6))
+
+    # Filtros aplicados
+    rango = f"{fecha_desde or '—'}  al  {fecha_hasta or '—'}"
+    elementos.append(Paragraph(
+        f"Período: <b>{rango}</b>  |  Socio: <b>{socio_nombre}</b>  |  "
+        f"Total registros: <b>{len(rows)}</b>  |  "
+        f"Generado: <b>{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</b>  |  "
+        f"Por: <b>{usuario_nombre}</b>",
+        st_info))
+
+    # ── Tabla ─────────────────────────────────────────────────────────────
+    encabezado = ["#", "Código", "Nombre", "Fecha",
+                  "Entrada", "Salida", "Estado", "Registrado por", "Observación"]
+    datos = [encabezado]
+
+    entradas_ok = 0
+    completos   = 0
+    for i, row in enumerate(rows, 1):
+        cod, nom, fec, ent, sal, est, reg, obs = row
+        datos.append([
+            str(i), cod or "", nom or "", fec or "",
+            ent or "", sal or "—", est or "",
+            reg or "", (obs or "")[:30]
+        ])
+        entradas_ok += 1
+        if est == "Completo":
+            completos += 1
+
+    # Fila de totales
+    datos.append([
+        "", "", "", "",
+        f"Total entradas: {entradas_ok}",
+        f"Completos: {completos}",
+        f"Solo entrada: {entradas_ok - completos}",
+        "", ""
+    ])
+
+    col_widths = [1*cm, 2.2*cm, 5*cm, 2.5*cm,
+                  2.2*cm, 2.2*cm, 2.3*cm, 4*cm, 4*cm]
+
+    tabla = Table(datos, colWidths=col_widths, repeatRows=1)
+    tabla.setStyle(TableStyle([
+        # Encabezado
+        ("BACKGROUND",   (0, 0), (-1, 0),  colors.HexColor("#0f2746")),
+        ("TEXTCOLOR",    (0, 0), (-1, 0),  colors.white),
+        ("FONTNAME",     (0, 0), (-1, 0),  "Helvetica-Bold"),
+        ("FONTSIZE",     (0, 0), (-1, 0),  9),
+        ("ALIGN",        (0, 0), (-1, 0),  "CENTER"),
+        ("TOPPADDING",   (0, 0), (-1, 0),  6),
+        ("BOTTOMPADDING",(0, 0), (-1, 0),  6),
+        # Filas alternas
+        ("ROWBACKGROUNDS",(0, 1), (-1, -2),
+         [colors.white, colors.HexColor("#eaf0fb")]),
+        ("FONTNAME",     (0, 1), (-1, -2), "Helvetica"),
+        ("FONTSIZE",     (0, 1), (-1, -2), 8),
+        ("ALIGN",        (0, 1), (-1, -2), "CENTER"),
+        ("TOPPADDING",   (0, 1), (-1, -2), 4),
+        ("BOTTOMPADDING",(0, 1), (-1, -2), 4),
+        # Columna Nombre alineada a izquierda
+        ("ALIGN",        (2, 1), (2, -1),  "LEFT"),
+        ("ALIGN",        (8, 1), (8, -1),  "LEFT"),
+        # Fila de totales
+        ("BACKGROUND",   (0, -1), (-1, -1), colors.HexColor("#1a73e8")),
+        ("TEXTCOLOR",    (0, -1), (-1, -1), colors.white),
+        ("FONTNAME",     (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE",     (0, -1), (-1, -1), 8),
+        ("SPAN",         (4, -1), (4, -1),  ),
+        # Bordes
+        ("GRID",         (0, 0), (-1, -1),  0.4, colors.HexColor("#c0c8d8")),
+        ("BOX",          (0, 0), (-1, -1),  1,   colors.HexColor("#0f2746")),
+    ]))
+
+    elementos.append(tabla)
+    elementos.append(Spacer(1, 0.6*cm))
+    elementos.append(HRFlowable(width="100%", thickness=1,
+                                color=colors.HexColor("#c0c8d8")))
+    elementos.append(Paragraph(
+        "AGRUPACIÓN AUTOMOVILÍSTICA AGUARICO  —  Sistema de Gestión v6  —  "
+        "Documento generado automáticamente", st_pie))
+
+    try:
+        doc.build(elementos)
+        messagebox.showinfo("PDF generado",
+            f"Reporte guardado en:\n{nombre_archivo}")
+        try:
+            os.startfile(nombre_archivo)
+        except Exception:
+            webbrowser.open(nombre_archivo)
+        return nombre_archivo
+    except Exception as ex:
+        messagebox.showerror("Error PDF", f"No se pudo crear el PDF:\n{ex}")
+        return ""
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # LOGIN
 # ════════════════════════════════════════════════════════════════════════════
 class LoginWindow(tk.Tk):
@@ -317,10 +661,10 @@ class LoginWindow(tk.Tk):
             self._msg.config(text="Complete usuario y contraseña.")
             return
         conn = get_conn(); c = conn.cursor()
-        c.execute("SELECT id,username,rol,nombre FROM usuarios WHERE username=? AND password=?",
-                  (user, hash_pwd(pwd)))
+        c.execute("SELECT id, username, rol, nombre, password FROM usuarios WHERE LOWER(username)=LOWER(?)",
+                  (user,))
         row = c.fetchone(); conn.close()
-        if row:
+        if row and verificar_pwd(pwd, row[4]):
             self.usuario_logueado = {"id": row[0], "username": row[1],
                                      "rol": row[2], "nombre": row[3]}
             self.destroy()
@@ -368,6 +712,27 @@ class MainApp(tk.Tk):
         label(hdr, f"  {self.usuario['nombre']}  |  {self.usuario['rol']}  ",
               bg=SIDEBAR, fg=SUBTEXT, font=FN).pack(side="right")
 
+        # ── Banner API ────────────────────────────────────────────────────
+        self._api_bar = tk.Frame(self, bg="#0d1f3c", height=26)
+        self._api_bar.pack(fill="x")
+        self._api_bar.pack_propagate(False)
+        self._api_lbl = tk.Label(self._api_bar,
+                                  text="  🔄  Verificando API...",
+                                  bg="#0d1f3c", fg=SUBTEXT, font=FS,
+                                  anchor="w")
+        self._api_lbl.pack(side="left", padx=8)
+        self._ip_lbl = tk.Label(self._api_bar, text="",
+                                 bg="#0d1f3c", fg=WARN, font=FS, anchor="e")
+        self._ip_lbl.pack(side="right", padx=8)
+        btn(self._api_bar, "▶ Iniciar API",
+            self._iniciar_api, bg="#1a73e8", font=FS, pady=1, padx=6
+            ).pack(side="right", padx=4)
+        btn(self._api_bar, "⟳ Verificar",
+            self._verificar_api, bg="#0d1f3c", font=FS, pady=1, padx=6
+            ).pack(side="right", padx=4)
+        # Verificar en background al arrancar
+        threading.Thread(target=self._verificar_api_bg, daemon=True).start()
+
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True)
 
@@ -402,6 +767,60 @@ class MainApp(tk.Tk):
 
         self.show_inicio()
 
+    def _verificar_api_bg(self):
+        """Corre en hilo background para no bloquear la UI."""
+        activa = check_api_disponible()
+        self.after(0, lambda: self._actualizar_api_lbl(activa))
+
+    def _verificar_api(self):
+        self._api_lbl.config(text="  🔄  Verificando...", fg=SUBTEXT)
+        threading.Thread(target=self._verificar_api_bg, daemon=True).start()
+
+    def _actualizar_api_lbl(self, activa: bool):
+        ip = get_ip_local()
+        if activa:
+            self._api_lbl.config(
+                text="  ✅  API activa  —  http://127.0.0.1:8000",
+                fg=SUCCESS)
+            self._ip_lbl.config(
+                text=f"📱 App móvil: http://{ip}:8000  ")
+            self._api_bar.config(bg="#0a2a1a")
+            self._api_lbl.config(bg="#0a2a1a")
+            self._ip_lbl.config(bg="#0a2a1a")
+        else:
+            self._api_lbl.config(
+                text="  ⚠️  API no iniciada  —  pulsa ▶ Iniciar API",
+                fg=WARN)
+            self._ip_lbl.config(
+                text=f"IP: {ip}  ")
+            self._api_bar.config(bg="#2a1a0a")
+            self._api_lbl.config(bg="#2a1a0a")
+            self._ip_lbl.config(bg="#2a1a0a")
+
+    def _iniciar_api(self):
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "backend_api.py")
+        if not os.path.isfile(script):
+            messagebox.showerror("Error",
+                f"No se encontró backend_api.py en:\n{script}")
+            return
+        try:
+            subprocess.Popen(
+                ["python", script],
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+                if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 0
+            )
+            self._api_lbl.config(
+                text="  🔄  Iniciando API... (espera 3 seg)", fg=SUBTEXT)
+            # Verificar después de 3 segundos
+            self.after(3000, self._verificar_api)
+        except Exception as ex:
+            messagebox.showerror("Error al iniciar API",
+                f"No se pudo lanzar el servidor:\n{ex}\n\n"
+                f"Inicia manualmente con:\n"
+                f"uvicorn backend_api:app --host 0.0.0.0 --port 8000")
+
     def _clear(self):
         for w in self._content.winfo_children():
             w.destroy()
@@ -423,11 +842,18 @@ class MainApp(tk.Tk):
         # Banner imagen o texto
         # Ruta absoluta primero, luego relativa como fallback
         _script_dir = os.path.dirname(os.path.abspath(__file__))
-        banner_path = os.path.join(_script_dir, "auto_deportivo_azul.jpg")
-        if not os.path.isfile(banner_path):
-            banner_path = "auto_deportivo_azul.jpg"  # fallback relativo
+        banner_cands = [
+            os.path.join(_script_dir, "auto_deportivo_azul.jpg"),
+            os.path.join(_script_dir, "auto_deportivo_azul.jpg.jpeg"),
+            os.path.join(_script_dir, "auto_deportivo_azul.jpeg"),
+            os.path.join(_script_dir, "auto_deportivo_azul.png"),
+            "auto_deportivo_azul.jpg",
+            "auto_deportivo_azul.jpg.jpeg",
+        ]
+        banner_path = next((p for p in banner_cands if os.path.isfile(p)), None)
 
-        if PIL_OK and os.path.isfile(banner_path):
+        ph = None
+        if PIL_OK and banner_path:
             try:
                 _img = Image.open(banner_path)
                 _img = _img.resize((900, 320), Image.LANCZOS)
@@ -436,8 +862,6 @@ class MainApp(tk.Tk):
                 tk.Label(f, image=ph, bg=BG).pack(pady=(0, 10))
             except Exception:
                 ph = None
-        else:
-            ph = None
 
         if not ph:
             tk.Frame(f, bg="#0a1a3a", height=140).pack(fill="x")
@@ -596,12 +1020,16 @@ class MainApp(tk.Tk):
             self._reg_entrada, bg=SUCCESS, font=FB, pady=6).pack(side="left", padx=4)
         btn(btn_row, "🚪 REGISTRAR SALIDA",
             self._reg_salida, bg=WARN, font=FB, pady=6).pack(side="left", padx=4)
+        btn(btn_row, "📷 ESCANEAR QR",
+            self._abrir_scan_qr, bg="#8e44ad", font=FB, pady=6).pack(side="left", padx=4)
         btn(btn_row, "🔄 Actualizar",
             self._cargar_asistencias, bg=PANEL).pack(side="left", padx=4)
         btn(btn_row, "🖨️ Historial Socio",
             self._imprimir_historial, bg=ACCENT).pack(side="left", padx=4)
         btn(btn_row, "📤 Exportar Hoy",
             self._exportar_hoy, bg="#8e44ad").pack(side="left", padx=4)
+        btn(btn_row, "📄 Exportar PDF",
+            self._abrir_exportar_pdf, bg="#c0392b", font=FB, pady=6).pack(side="left", padx=4)
 
         # Estado del día
         self._asist_estado = label(f, "", bg=BG, fg=SUCCESS, font=FB)
@@ -718,6 +1146,65 @@ class MainApp(tk.Tk):
         for row in c.fetchall():
             self._tree_as.insert("", "end", values=row)
         conn.close()
+
+    def _abrir_scan_qr(self):
+        """Abre la ventana de escaneo QR y registra entrada/salida automáticamente."""
+        ScanQRWindow(self, callback=self._registrar_por_qr)
+
+    def _registrar_por_qr(self, s):
+        """
+        Recibe dict con id, codigo, nombre, cedula del socio escaneado.
+        Registra entrada si no tiene hoy, o salida si ya tiene entrada sin salida.
+        """
+        hoy  = datetime.now().strftime("%d/%m/%Y")
+        hora = datetime.now().strftime("%H:%M:%S")
+        conn = get_conn(); c = conn.cursor()
+
+        # Buscar registro de hoy
+        c.execute("""SELECT id, hora_salida FROM asistencias
+                     WHERE socio_id=? AND fecha=?""",
+                  (s["id"], hoy))
+        row = c.fetchone()
+
+        if not row:
+            # Registrar ENTRADA
+            c.execute("""INSERT INTO asistencias
+                         (socio_id,codigo_puesto,nombre_socio,fecha,
+                          hora_entrada,estado,registrado_por,observacion)
+                         VALUES (?,?,?,?,?,?,?,?)""",
+                      (s["id"], s["codigo"], s["nombre"], hoy, hora,
+                       "Entrada", self.usuario["nombre"], "Registro por QR"))
+            conn.commit(); conn.close()
+            self._asist_estado.config(
+                text=f"✅ ENTRADA por QR: {s['nombre']}  {hora}", fg=SUCCESS)
+            messagebox.showinfo("Entrada registrada",
+                f"✅ ENTRADA registrada:\n\n"
+                f"  Socio: {s['nombre']}\n"
+                f"  Código: {s['codigo']}\n"
+                f"  Hora: {hora}")
+        elif not row[1] or row[1] == "":
+            # Registrar SALIDA
+            c.execute("""UPDATE asistencias
+                         SET hora_salida=?, estado='Completo'
+                         WHERE id=?""", (hora, row[0]))
+            conn.commit(); conn.close()
+            self._asist_estado.config(
+                text=f"🚪 SALIDA por QR: {s['nombre']}  {hora}", fg=WARN)
+            messagebox.showinfo("Salida registrada",
+                f"🚪 SALIDA registrada:\n\n"
+                f"  Socio: {s['nombre']}\n"
+                f"  Código: {s['codigo']}\n"
+                f"  Hora: {hora}")
+        else:
+            conn.close()
+            messagebox.showinfo("Ya registrado",
+                f"{s['nombre']} ya tiene entrada y salida registradas hoy.")
+
+        self._cargar_asistencias()
+
+    def _abrir_exportar_pdf(self):
+        """Abre el diálogo de filtros para exportar PDF de asistencia."""
+        ExportarPDFDialog(self, self.usuario["nombre"])
 
     def _imprimir_historial(self):
         s = self._get_socio_sel()
@@ -1217,6 +1704,343 @@ class MainApp(tk.Tk):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# VENTANA ESCANEO QR
+# ════════════════════════════════════════════════════════════════════════════
+class ScanQRWindow(tk.Toplevel):
+    """
+    Ventana para escanear QR con cámara (OpenCV+pyzbar) o tipear manualmente.
+    Al decodificar un QR válido (formato AGUARICO|cedula|codigo),
+    llama a callback(cedula, codigo_puesto).
+    """
+    def __init__(self, parent, callback):
+        super().__init__(parent)
+        self.title("Escanear Código QR")
+        self.configure(bg=BG)
+        self.grab_set()
+        self.resizable(False, False)
+        self._callback  = callback
+        self._cap       = None
+        self._running   = False
+        self._after_id  = None
+        self._build()
+
+    def _build(self):
+        label(self, "ESCANEAR CÓDIGO QR", bg=BG, fg=ACCENT,
+              font=("Segoe UI", 13, "bold")).pack(pady=(12, 4))
+
+        # ── Cámara ────────────────────────────────────────────────────────
+        if CV2_OK:
+            self._cam_frame = tk.Frame(self, bg="black",
+                                       width=480, height=360)
+            self._cam_frame.pack(padx=12, pady=6)
+            self._cam_frame.pack_propagate(False)
+
+            self._cam_lbl = tk.Label(self._cam_frame, bg="black",
+                                     text="Iniciando cámara…",
+                                     fg="white")
+            self._cam_lbl.pack(expand=True)
+
+            metodo = "pyzbar" if PYZBAR_OK else "OpenCV QRCodeDetector"
+            self._status = label(self,
+                                 f"Apunta el QR del socio a la cámara  [{metodo}]",
+                                 bg=BG, fg=SUBTEXT, font=FN)
+            self._status.pack(pady=4)
+
+            btn_row = tk.Frame(self, bg=BG); btn_row.pack(pady=4)
+            btn(btn_row, "▶ Iniciar Cámara",  self._start_cam,
+                bg=SUCCESS, width=16).pack(side="left", padx=6)
+            btn(btn_row, "⏹ Detener",         self._stop_cam,
+                bg=DANGER, width=10).pack(side="left", padx=6)
+        else:
+            label(self,
+                  "Camara no disponible\n(opencv-python no instalado)",
+                  bg=BG, fg=WARN, font=FB).pack(pady=18)
+
+        # ── Separador ──────────────────────────────────────────────────────
+        sep = tk.Frame(self, bg=ACCENT, height=1)
+        sep.pack(fill="x", padx=12, pady=8)
+
+        # ── Ingreso manual ─────────────────────────────────────────────────
+        lf_manual = lframe(self, "Ingreso manual (sin cámara)")
+        lf_manual.pack(fill="x", padx=12, pady=4)
+
+        label(lf_manual,
+              "Escribe la cédula  ó  el código AGUARICO|cedula|codigo",
+              bg=PANEL, fg=SUBTEXT, font=FS).pack(padx=8, pady=(6, 2))
+
+        row_m = tk.Frame(lf_manual, bg=PANEL); row_m.pack(padx=8, pady=6)
+        self._manual_var = tk.StringVar()
+        e_manual = entry(row_m, width=36, textvariable=self._manual_var)
+        e_manual.pack(side="left", ipady=4)
+        btn(row_m, "Registrar",
+            self._manual_ok, bg=SUCCESS, pady=4).pack(side="left", padx=6)
+        e_manual.bind("<Return>", lambda e: self._manual_ok())
+        e_manual.focus_set()
+
+        btn(self, "Cerrar", self._cerrar,
+            bg=DANGER, width=14, pady=6).pack(pady=10)
+
+        self.protocol("WM_DELETE_WINDOW", self._cerrar)
+
+    # ── Cámara ─────────────────────────────────────────────────────────────
+    def _start_cam(self):
+        if self._running:
+            return
+        try:
+            self._cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            if not self._cap.isOpened():
+                self._cap = cv2.VideoCapture(0)
+            if not self._cap.isOpened():
+                messagebox.showwarning("Cámara",
+                    "No se pudo abrir la cámara.\n"
+                    "Usa el ingreso manual.")
+                return
+            self._running = True
+            self._leer_frame()
+        except Exception as ex:
+            messagebox.showerror("Error cámara", str(ex))
+
+    def _leer_frame(self):
+        if not self._running or not self._cap:
+            return
+        ret, frame = self._cap.read()
+        if not ret:
+            self._after_id = self.after(100, self._leer_frame)
+            return
+
+        contenido_detectado = None
+
+        # Intentar con pyzbar primero (más robusto si está disponible)
+        if PYZBAR_OK:
+            try:
+                decodificados = _pyzbar_mod.decode(frame)
+                for obj in decodificados:
+                    texto = obj.data.decode("utf-8", errors="ignore")
+                    datos = parsear_qr(texto)
+                    if datos:
+                        # Dibujar recuadro
+                        pts = obj.polygon
+                        if len(pts) >= 4:
+                            import numpy as np
+                            pts_arr = np.array([(p.x, p.y) for p in pts],
+                                               dtype=np.int32)
+                            cv2.polylines(frame, [pts_arr], True,
+                                          (0, 255, 0), 3)
+                        contenido_detectado = datos
+                        break
+            except Exception:
+                pass
+
+        # Fallback: cv2.QRCodeDetector
+        if contenido_detectado is None and CV2_QR_OK:
+            try:
+                detector = cv2.QRCodeDetector()
+                texto, pts, _ = detector.detectAndDecode(frame)
+                if texto:
+                    datos = parsear_qr(texto)
+                    if datos:
+                        if pts is not None:
+                            import numpy as np
+                            pts_int = pts.astype(int).reshape((-1, 1, 2))
+                            cv2.polylines(frame, [pts_int], True,
+                                          (0, 255, 0), 3)
+                        contenido_detectado = datos
+            except Exception:
+                pass
+
+        if contenido_detectado:
+            self._mostrar_frame(frame)
+            self._stop_cam()
+            self._status.config(text="QR leido correctamente", fg=SUCCESS)
+            self.after(400,
+                       lambda d=contenido_detectado: self._confirmar_qr(d))
+            return
+
+        self._mostrar_frame(frame)
+        self._after_id = self.after(33, self._leer_frame)  # ~30 fps
+
+    def _mostrar_frame(self, frame):
+        try:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w = frame_rgb.shape[:2]
+            # Escalar a 480x360 manteniendo aspecto
+            scale = min(480 / w, 360 / h)
+            nw, nh = int(w * scale), int(h * scale)
+            frame_rgb = cv2.resize(frame_rgb, (nw, nh))
+            img = Image.fromarray(frame_rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self._cam_lbl.config(image=imgtk, text="")
+            self._cam_lbl._imgtk = imgtk  # evitar GC
+        except Exception:
+            pass
+
+    def _stop_cam(self):
+        self._running = False
+        if self._after_id:
+            try:
+                self.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+        if self._cap:
+            self._cap.release()
+            self._cap = None
+
+    # ── Manual ─────────────────────────────────────────────────────────────
+    def _manual_ok(self):
+        texto = self._manual_var.get().strip()
+        if not texto:
+            messagebox.showwarning("Vacío", "Ingresa la cédula o código QR.")
+            return
+        datos = parsear_qr(texto)
+        if not datos:
+            messagebox.showwarning("Formato inválido",
+                "No se reconoció el código.\n\n"
+                "Formatos válidos:\n"
+                "• Solo cédula: 0912345678\n"
+                "• QR completo: AGUARICO|0912345678|A-01")
+            return
+        self._confirmar_qr(datos)
+
+    # ── Confirmación ───────────────────────────────────────────────────────
+    def _confirmar_qr(self, datos):
+        """Busca el socio en DB y llama al callback."""
+        cedula  = datos.get("cedula", "")
+        codigo  = datos.get("codigo_puesto", "")
+
+        conn = get_conn(); c = conn.cursor()
+        if cedula:
+            c.execute("SELECT id,codigo_puesto,nombre,apellido,cedula "
+                      "FROM socios WHERE cedula=? AND estado='ACTIVO'",
+                      (cedula,))
+        elif codigo:
+            c.execute("SELECT id,codigo_puesto,nombre,apellido,cedula "
+                      "FROM socios WHERE codigo_puesto=? AND estado='ACTIVO'",
+                      (codigo,))
+        else:
+            conn.close(); return
+        row = c.fetchone(); conn.close()
+
+        if not row:
+            messagebox.showwarning("Socio no encontrado",
+                f"No se encontró socio activo con\n"
+                f"Cédula: {cedula}  /  Código: {codigo}")
+            return
+
+        s = {"id": row[0], "codigo": row[1],
+             "nombre": f"{row[2]} {row[3]}", "cedula": row[4]}
+
+        if messagebox.askyesno("Confirmar",
+            f"Socio encontrado:\n\n"
+            f"  {s['nombre']}\n"
+            f"  Código: {s['codigo']}\n"
+            f"  Cédula: {s['cedula']}\n\n"
+            f"¿Registrar asistencia?"):
+            self._callback(s)
+            self.destroy()
+
+    def _cerrar(self):
+        self._stop_cam()
+        self.destroy()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# DIÁLOGO EXPORTAR PDF ASISTENCIA
+# ════════════════════════════════════════════════════════════════════════════
+class ExportarPDFDialog(tk.Toplevel):
+    """
+    Diálogo con filtros de fecha y socio para exportar PDF de asistencia.
+    """
+    def __init__(self, parent, usuario_nombre):
+        super().__init__(parent)
+        self.title("Exportar PDF de Asistencia")
+        self.configure(bg=BG)
+        self.grab_set()
+        self.resizable(False, False)
+        self._usuario = usuario_nombre
+        self._socio_ids = []
+        self._build()
+
+    def _build(self):
+        label(self, "EXPORTAR REPORTE DE ASISTENCIA EN PDF",
+              bg=BG, fg=ACCENT, font=("Segoe UI", 12, "bold")).pack(
+            pady=(16, 8), padx=20)
+
+        lf = lframe(self, "Filtros", bg=PANEL)
+        lf.pack(fill="x", padx=16, pady=6)
+
+        # Fechas
+        row_f = tk.Frame(lf, bg=PANEL); row_f.pack(fill="x", padx=10, pady=8)
+        label(row_f, "Desde (dd/mm/aaaa):", bg=PANEL, width=20,
+              anchor="w").pack(side="left")
+        self._desde_e = entry(row_f, width=14)
+        self._desde_e.pack(side="left", ipady=3)
+        label(row_f, "  Hasta:", bg=PANEL).pack(side="left")
+        self._hasta_e = entry(row_f, width=14)
+        self._hasta_e.pack(side="left", padx=6, ipady=3)
+
+        # Presets de fecha
+        row_p = tk.Frame(lf, bg=PANEL); row_p.pack(fill="x", padx=10, pady=4)
+        label(row_p, "Acceso rápido:", bg=PANEL, fg=SUBTEXT, font=FS).pack(side="left")
+        for texto, d, h in [
+            ("Hoy",           0, 0),
+            ("Esta semana",   6, 0),
+            ("Este mes",      30, 0),
+            ("Últimos 3 m",   90, 0),
+        ]:
+            btn(row_p, texto,
+                lambda d=d: self._preset(d),
+                bg=PANEL, font=FS, pady=2, padx=4).pack(side="left", padx=2)
+
+        # Socio
+        row_s = tk.Frame(lf, bg=PANEL); row_s.pack(fill="x", padx=10, pady=8)
+        label(row_s, "Socio:", bg=PANEL, width=20, anchor="w").pack(side="left")
+        self._socio_var = tk.StringVar(value="— Todos los socios —")
+        self._socio_cb  = ttk.Combobox(lf, textvariable=self._socio_var,
+                                        width=48, state="readonly", font=FN)
+        self._socio_cb.pack(padx=10, pady=(0, 10))
+        self._cargar_socios()
+
+        btn_row = tk.Frame(self, bg=BG); btn_row.pack(pady=14)
+        btn(btn_row, "🖨️  Exportar PDF",
+            self._exportar, bg=ACCENT, font=FB, pady=8, padx=12
+            ).pack(side="left", padx=8)
+        btn(btn_row, "Cancelar",
+            self.destroy, bg=DANGER, pady=8
+            ).pack(side="left", padx=8)
+
+    def _preset(self, dias_atras):
+        hasta = datetime.now()
+        desde = hasta - timedelta(days=dias_atras)
+        self._desde_e.delete(0, "end")
+        self._desde_e.insert(0, desde.strftime("%d/%m/%Y"))
+        self._hasta_e.delete(0, "end")
+        self._hasta_e.insert(0, hasta.strftime("%d/%m/%Y"))
+
+    def _cargar_socios(self):
+        conn = get_conn(); c = conn.cursor()
+        c.execute("SELECT id,codigo_puesto,nombre,apellido FROM socios ORDER BY apellido")
+        rows = c.fetchall(); conn.close()
+        self._socio_ids = [None] + [r[0] for r in rows]
+        nombres = ["— Todos los socios —"] + [
+            f"{r[1]} — {r[2]} {r[3]}" for r in rows]
+        self._socio_cb["values"] = nombres
+        self._socio_cb.current(0)
+
+    def _exportar(self):
+        desde = self._desde_e.get().strip()
+        hasta = self._hasta_e.get().strip()
+        idx   = self._socio_cb.current()
+        sid   = self._socio_ids[idx] if idx >= 0 else None
+        nom   = self._socio_var.get()
+
+        exportar_pdf_asistencia(
+            self, self._usuario,
+            fecha_desde=desde, fecha_hasta=hasta,
+            socio_id=sid, socio_nombre=nom)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # FORMULARIO SOCIO
 # ════════════════════════════════════════════════════════════════════════════
 class FormSocio(tk.Toplevel):
@@ -1285,6 +2109,10 @@ class FormSocio(tk.Toplevel):
             bg=SUCCESS, width=22, pady=6).grid(
             row=row_e+2, column=0, columnspan=2, pady=12)
 
+        btn(lf_main, "📷  Generar QR del Socio", self._gen_qr,
+            bg="#8e44ad", width=22, pady=5).grid(
+            row=row_e+3, column=0, columnspan=2, pady=(0, 8))
+
         # Foto
         right = tk.Frame(self, bg=BG, padx=14, pady=14)
         right.pack(side="left", anchor="n")
@@ -1295,6 +2123,27 @@ class FormSocio(tk.Toplevel):
         self._foto_var.set(d.get("foto",""))
         self._preview_foto()
         btn(right, "📷 Seleccionar foto", self._sel_foto, bg=ACCENT).pack()
+
+    def _gen_qr(self):
+        cedula  = self._entries["cedula"].get().strip()
+        codigo  = self._entries["codigo_puesto"].get().strip()
+        nombre  = (self._entries["nombre"].get().strip() + " " +
+                   self._entries["apellido"].get().strip()).strip()
+        if not cedula and not codigo:
+            messagebox.showwarning("Datos faltantes",
+                "Ingresa al menos la cédula o el código de puesto antes de generar QR.")
+            return
+        ruta = generar_qr_socio(
+            socio_id=self._sid, cedula=cedula,
+            codigo_puesto=codigo, nombre=nombre)
+        if ruta:
+            messagebox.showinfo("QR generado",
+                f"QR guardado en:\n{ruta}\n\n"
+                f"Contenido: AGUARICO|{cedula}|{codigo}")
+            try:
+                os.startfile(ruta)
+            except Exception:
+                pass
 
     def _sel_foto(self):
         f = filedialog.askopenfilename(
@@ -1459,6 +2308,23 @@ class ExpedienteWindow(tk.Toplevel):
             btn(wa_f, f"📱 WhatsApp {s.get('whatsapp','')}",
                 lambda: wa_open(s.get("whatsapp","")),
                 bg="#25D366").pack(fill="x")
+
+        # Botón Generar QR
+        def _qr_exp():
+            ruta = generar_qr_socio(
+                socio_id=s.get("id"),
+                cedula=s.get("cedula",""),
+                codigo_puesto=s.get("codigo_puesto",""),
+                nombre=f"{s.get('nombre','')} {s.get('apellido','')}")
+            if ruta:
+                messagebox.showinfo("QR generado", f"QR guardado en:\n{ruta}")
+                try:
+                    os.startfile(ruta)
+                except Exception:
+                    pass
+        btn(p, "📷  Generar / Ver QR del Socio",
+            _qr_exp, bg="#8e44ad", pady=6).pack(
+            fill="x", padx=4, pady=(4, 0))
 
         # Arrendatario
         arr_lf = lframe(p, "ARRENDATARIO", fg=WARN)
