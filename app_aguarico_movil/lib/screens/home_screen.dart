@@ -1,172 +1,384 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../providers/auth_provider.dart';
-import '../config/api_config.dart';
+import 'package:geolocator/geolocator.dart';
+import '../services/api_service.dart';
+import 'panic_screen.dart';
+import 'camouflage_screen.dart';
 import 'qr_scanner_screen.dart';
 import 'login_screen.dart';
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+class HomeScreen extends StatefulWidget {
+  final String unidad;
+  final String socioNombre;
+  final String telefono;
+
+  const HomeScreen({
+    Key? key,
+    this.unidad = 'Unidad-10',
+    this.socioNombre = 'Jorge Stalyn Enríquez',
+    this.telefono = '0963178853',
+  }) : super(key: key);
 
   @override
-  Widget build(BuildContext context) {
-    final auth = context.watch<AuthProvider>();
+  _HomeScreenState createState() => _HomeScreenState();
+}
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Aguarico Móvil'),
-        backgroundColor: const Color(0xFF1B5E20),
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Cerrar sesión',
-            onPressed: () async {
-              await auth.logout();
-              if (context.mounted) {
-                Navigator.pushReplacement(
-                  context,
-                  MaterialPageRoute(builder: (_) => const LoginScreen()),
-                );
-              }
-            },
+class _HomeScreenState extends State<HomeScreen> {
+  bool _conectado = false;
+  bool _esperandoDesconexion = false;
+  double _lat = -0.22985;
+  double _lng = -78.52495;
+  Timer? _gpsTimer;
+  bool _camuflajeActivo = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _iniciarGPS();
+  }
+
+  void _iniciarGPS() async {
+    try {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.always || perm == LocationPermission.whileInUse) {
+        Position pos = await Geolocator.getCurrentPosition();
+        setState(() {
+          _lat = pos.latitude;
+          _lng = pos.longitude;
+        });
+      }
+    } catch (_) {}
+
+    // Enviar GPS periódico cada 6 segundos si está conectado
+    _gpsTimer = Timer.periodic(const Duration(seconds: 6), (timer) async {
+      if (_conectado) {
+        try {
+          Position pos = await Geolocator.getCurrentPosition();
+          setState(() {
+            _lat = pos.latitude;
+            _lng = pos.longitude;
+          });
+        } catch (_) {}
+
+        final resp = await ApiService.enviarGPS(
+          unidad: widget.unidad,
+          lat: _lat,
+          lng: _lng,
+        );
+
+        // Si la matriz aprobó la desconexión desde la PC central:
+        if (resp['desconexion_aprobada'] == true) {
+          setState(() {
+            _conectado = false;
+            _esperandoDesconexion = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('La Matriz ha aprobado tu fin de turno. Desconectado.'),
+              backgroundColor: Colors.blue,
+            ),
+          );
+        }
+      }
+    });
+  }
+
+  void _conectarTurno() async {
+    final resp = await ApiService.conectarTurno(
+      unidad: widget.unidad,
+      socioNombre: widget.socioNombre,
+      telefono: widget.telefono,
+      lat: _lat,
+      lng: _lng,
+    );
+
+    if (resp['status'] == 'ok') {
+      setState(() {
+        _conectado = true;
+        _esperandoDesconexion = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Turno conectado. GPS transmitiendo a la Matriz.'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
+  }
+
+  void _solicitarDesconexion() async {
+    final ok = await ApiService.solicitarDesconexion(widget.unidad);
+    if (ok) {
+      setState(() {
+        _esperandoDesconexion = true;
+      });
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: const Color(0xFF162D50),
+          title: const Text('Solicitud Enviada a la Matriz', style: TextStyle(color: Colors.white)),
+          content: const Text(
+            'Para tu seguridad, la aplicación requiere autorización de la Matriz para desconectarse.\n\nPor favor espera la confirmación del operador central.',
+            style: TextStyle(color: Colors.white70),
           ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Bienvenida
-            Card(
-              color: const Color(0xFFE8F5E9),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    const Icon(Icons.account_circle,
-                        size: 48, color: Color(0xFF1B5E20)),
-                    const SizedBox(width: 12),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Bienvenido',
-                            style: TextStyle(color: Colors.grey[600])),
-                        Text(
-                          auth.usuario?.usuario ?? '',
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        Text('Rol: ${auth.usuario?.rol ?? ""}',
-                            style: TextStyle(color: Colors.grey[700])),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // Servidor conectado
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.grey[100],
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.wifi, size: 18, color: Colors.grey),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Servidor: ${ApiConfig.baseUrl}',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 28),
-
-            // Botones de acción
-            const Text(
-              'Acciones',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 16),
-
-            _ActionCard(
-              icon: Icons.qr_code_scanner,
-              titulo: 'Escanear QR',
-              subtitulo: 'Registrar asistencia con código QR',
-              color: const Color(0xFF1B5E20),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const QrScannerScreen()),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            _ActionCard(
-              icon: Icons.people,
-              titulo: 'Lista de Socios',
-              subtitulo: 'Ver todos los socios registrados',
-              color: Colors.blue[700]!,
-              onTap: () => ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Próximamente disponible')),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            _ActionCard(
-              icon: Icons.calendar_today,
-              titulo: 'Asistencias',
-              subtitulo: 'Historial de asistencias',
-              color: Colors.orange[700]!,
-              onTap: () => ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Próximamente disponible')),
-              ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Entendido', style: TextStyle(color: Colors.orange)),
             ),
           ],
+        ),
+      );
+    }
+  }
+
+  void _activarPanico() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PanicScreen(
+          unidad: widget.unidad,
+          socioNombre: widget.socioNombre,
+          lat: _lat,
+          lng: _lng,
         ),
       ),
     );
   }
-}
 
-class _ActionCard extends StatelessWidget {
-  final IconData icon;
-  final String titulo;
-  final String subtitulo;
-  final Color color;
-  final VoidCallback onTap;
-
-  const _ActionCard({
-    required this.icon,
-    required this.titulo,
-    required this.subtitulo,
-    required this.color,
-    required this.onTap,
-  });
+  @override
+  void dispose() {
+    _gpsTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: color.withOpacity(0.15),
-          child: Icon(icon, color: color),
+    if (_camuflajeActivo) {
+      return CamouflageScreen(
+        onTriggerSilentPanic: () {
+          ApiService.dispararAlertaPanico(
+            unidad: widget.unidad,
+            socioNombre: widget.socioNombre,
+            lat: _lat,
+            lng: _lng,
+          );
+        },
+        onExitCamouflage: () {
+          setState(() {
+            _camuflajeActivo = false;
+          });
+        },
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF0F2746),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF162D50),
+        title: Text('${widget.unidad} — ${widget.socioNombre}'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.qr_code_scanner, color: Colors.greenAccent),
+            tooltip: 'Escanear QR Asistencia',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const QrScannerScreen()),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.calculate_outlined),
+            tooltip: 'Activar Modo Camuflaje',
+            onPressed: () {
+              setState(() {
+                _camuflajeActivo = true;
+              });
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: 'Salir',
+            onPressed: () {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
+              );
+            },
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Estado de Conexión
+              Card(
+                color: const Color(0xFF1E3A5F),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                child: Padding(
+                  padding: const EdgeInsets.all(18.0),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _conectado ? Icons.wifi : Icons.wifi_off,
+                        color: _conectado ? Colors.greenAccent : Colors.redAccent,
+                        size: 38,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _conectado
+                                  ? (_esperandoDesconexion ? 'ESPERANDO AUTORIZACIÓN MATRIZ' : 'EN SERVICIO / CONECTADO')
+                                  : 'FUERA DE TURNO (DESCONECTADO)',
+                              style: TextStyle(
+                                color: _conectado
+                                    ? (_esperandoDesconexion ? Colors.orange : Colors.greenAccent)
+                                    : Colors.redAccent,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'GPS: ${_lat.toStringAsFixed(5)}, ${_lng.toStringAsFixed(5)}',
+                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Botones de Conectar / Desconectar
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _conectado ? null : _conectarTurno,
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('CONECTAR'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green.shade700,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: !_conectado || _esperandoDesconexion ? null : _solicitarDesconexion,
+                      icon: const Icon(Icons.stop),
+                      label: Text(_esperandoDesconexion ? 'SOLICITADO...' : 'DESCONECTAR'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orange.shade800,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 12),
+
+              // Botón directo para escaneo QR
+              ElevatedButton.icon(
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const QrScannerScreen()),
+                  );
+                },
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('ESCANEAR QR ASISTENCIA'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF1B5E20),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+              ),
+
+              const Spacer(),
+
+              // BOTÓN DE PÁNICO
+              Center(
+                child: GestureDetector(
+                  onTap: _activarPanico,
+                  child: Container(
+                    width: 210,
+                    height: 210,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: const RadialGradient(
+                        colors: [Color(0xFFFF1744), Color(0xFFB71C1C)],
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.red.withOpacity(0.5),
+                          blurRadius: 30,
+                          spreadRadius: 8,
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: const [
+                        Icon(Icons.warning_rounded, size: 72, color: Colors.white),
+                        SizedBox(height: 8),
+                        Text(
+                          'PÁNICO',
+                          style: TextStyle(
+                            fontSize: 26,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                            letterSpacing: 2,
+                          ),
+                        ),
+                        Text(
+                          'Toca en peligro',
+                          style: TextStyle(color: Colors.white70, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+              const Spacer(),
+
+              // Botón rápido modo oculto
+              OutlinedButton.icon(
+                onPressed: () {
+                  setState(() {
+                    _camuflajeActivo = true;
+                  });
+                },
+                icon: const Icon(Icons.visibility_off_outlined, color: Colors.white70),
+                label: const Text(
+                  'ACTIVAR PANTALLA CAMUFLADA (CALCULADORA)',
+                  style: TextStyle(color: Colors.white70),
+                ),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Colors.white24),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+              ),
+              const SizedBox(height: 10),
+            ],
+          ),
         ),
-        title: Text(titulo, style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Text(subtitulo),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: onTap,
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       ),
     );
   }

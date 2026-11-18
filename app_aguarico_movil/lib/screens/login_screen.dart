@@ -1,163 +1,135 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../providers/auth_provider.dart';
 import 'home_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({Key? key}) : super(key: key);
 
   @override
-  State<LoginScreen> createState() => _LoginScreenState();
+  _LoginScreenState createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _formKey = GlobalKey<FormState>();
-  final _usuarioCtrl = TextEditingController();
-  final _claveCtrl = TextEditingController();
-  bool _ocultarClave = true;
+  final _unidadCtrl = TextEditingController(text: 'Unidad-10');
+  final _nombreCtrl = TextEditingController(text: 'Jorge Stalyn Enríquez');
+  final _telCtrl = TextEditingController(text: '0963178853');
+  final bool _loading = false;
 
-  @override
-  void dispose() {
-    _usuarioCtrl.dispose();
-    _claveCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _iniciarSesion() async {
-    if (!_formKey.currentState!.validate()) return;
-
-    final auth = context.read<AuthProvider>();
-    final ok = await auth.login(
-      _usuarioCtrl.text.trim(),
-      _claveCtrl.text.trim(),
-    );
-
-    if (ok && mounted) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen()),
+  void _iniciar() {
+    if (_unidadCtrl.text.isEmpty || _nombreCtrl.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Completa el número de unidad y nombre.')),
       );
+      return;
     }
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => HomeScreen(
+          unidad: _unidadCtrl.text.trim(),
+          socioNombre: _nombreCtrl.text.trim(),
+          telefono: _telCtrl.text.trim(),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final auth = context.watch<AuthProvider>();
-
     return Scaffold(
-      backgroundColor: const Color(0xFF1B5E20),
+      backgroundColor: const Color(0xFF0F2746),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(32),
-            child: Card(
-              elevation: 8,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(28),
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Logo / título
-                      const Icon(Icons.water_drop, size: 64, color: Color(0xFF1B5E20)),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Agrupación Aguarico',
-                        style: TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF1B5E20),
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Sistema de Gestión v6',
-                        style: TextStyle(color: Colors.grey[600]),
-                      ),
-                      const SizedBox(height: 28),
-
-                      // Campo usuario
-                      TextFormField(
-                        controller: _usuarioCtrl,
-                        decoration: const InputDecoration(
-                          labelText: 'Usuario',
-                          prefixIcon: Icon(Icons.person),
-                          border: OutlineInputBorder(),
-                        ),
-                        textInputAction: TextInputAction.next,
-                        validator: (v) =>
-                            v == null || v.isEmpty ? 'Ingresa tu usuario' : null,
-                      ),
-                      const SizedBox(height: 16),
-
-                      // Campo clave
-                      TextFormField(
-                        controller: _claveCtrl,
-                        obscureText: _ocultarClave,
-                        decoration: InputDecoration(
-                          labelText: 'Clave',
-                          prefixIcon: const Icon(Icons.lock),
-                          border: const OutlineInputBorder(),
-                          suffixIcon: IconButton(
-                            icon: Icon(_ocultarClave
-                                ? Icons.visibility
-                                : Icons.visibility_off),
-                            onPressed: () =>
-                                setState(() => _ocultarClave = !_ocultarClave),
-                          ),
-                        ),
-                        textInputAction: TextInputAction.done,
-                        onFieldSubmitted: (_) => _iniciarSesion(),
-                        validator: (v) =>
-                            v == null || v.isEmpty ? 'Ingresa tu clave' : null,
-                      ),
-                      const SizedBox(height: 8),
-
-                      // Error
-                      if (auth.error != null)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          child: Text(
-                            auth.error!,
-                            style: const TextStyle(color: Colors.red),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-
-                      const SizedBox(height: 16),
-
-                      // Botón
-                      SizedBox(
-                        width: double.infinity,
-                        height: 48,
-                        child: ElevatedButton(
-                          onPressed: auth.cargando ? null : _iniciarSesion,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF1B5E20),
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                          ),
-                          child: auth.cargando
-                              ? const SizedBox(
-                                  width: 22,
-                                  height: 22,
-                                  child: CircularProgressIndicator(
-                                      color: Colors.white, strokeWidth: 2),
-                                )
-                              : const Text('Iniciar Sesión',
-                                  style: TextStyle(fontSize: 16)),
-                        ),
-                      ),
-                    ],
+            padding: const EdgeInsets.all(28.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF162D50),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.local_taxi_rounded,
+                    size: 72,
+                    color: Color(0xFF1A73E8),
                   ),
                 ),
-              ),
+                const SizedBox(height: 20),
+                const Text(
+                  'TAXI SEGURO',
+                  style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const Text(
+                  'Agrupación Aguarico — Módulo Móvil',
+                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                ),
+                const SizedBox(height: 36),
+                TextField(
+                  controller: _unidadCtrl,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    labelText: 'Número de Unidad / Taxi',
+                    labelStyle: const TextStyle(color: Colors.white70),
+                    prefixIcon: const Icon(Icons.pin_outlined, color: Colors.white70),
+                    filled: true,
+                    fillColor: const Color(0xFF1E3A5F),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _nombreCtrl,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    labelText: 'Nombre del Conductor',
+                    labelStyle: const TextStyle(color: Colors.white70),
+                    prefixIcon: const Icon(Icons.person_outline, color: Colors.white70),
+                    filled: true,
+                    fillColor: const Color(0xFF1E3A5F),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _telCtrl,
+                  keyboardType: TextInputType.phone,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    labelText: 'Teléfono / WhatsApp',
+                    labelStyle: const TextStyle(color: Colors.white70),
+                    prefixIcon: const Icon(Icons.phone_android, color: Colors.white70),
+                    filled: true,
+                    fillColor: const Color(0xFF1E3A5F),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                ),
+                const SizedBox(height: 28),
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: ElevatedButton(
+                    onPressed: _loading ? null : _iniciar,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1A73E8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    child: _loading
+                        ? const CircularProgressIndicator(color: Colors.white)
+                        : const Text(
+                            'INGRESAR AL SISTEMA',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                          ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
