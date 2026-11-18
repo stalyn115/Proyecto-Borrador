@@ -13,16 +13,29 @@ class AuthService {
           .post(
             Uri.parse(ApiConfig.loginUrl),
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'usuario': usuario, 'clave': clave}),
+            body: jsonEncode({
+              'username': usuario,
+              'password': clave,
+              'usuario': usuario,
+              'clave': clave,
+            }),
           )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 12));
 
       final data = jsonDecode(response.body);
+      final token = data['token'] ?? data['access_token'];
 
-      if (response.statusCode == 200 && (data['success'] == true || data['token'] != null)) {
-        return AuthResult.ok(Usuario.fromJson(data));
+      if (response.statusCode == 200 && (data['success'] == true || token != null)) {
+        final uData = data['usuario'] is Map
+            ? Map<String, dynamic>.from(data['usuario'])
+            : <String, dynamic>{};
+        uData['token'] = token ?? '';
+        if (!uData.containsKey('usuario') || uData['usuario'] == null) {
+          uData['usuario'] = uData['username'] ?? usuario;
+        }
+        return AuthResult.ok(Usuario.fromJson(uData));
       } else {
-        final msg = data['mensaje'] ?? data['message'] ?? 'Usuario o clave incorrectos';
+        final msg = data['detail'] ?? data['mensaje'] ?? data['message'] ?? 'Usuario o clave incorrectos';
         return AuthResult.error(msg.toString());
       }
     } on Exception catch (e) {

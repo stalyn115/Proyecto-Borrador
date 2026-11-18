@@ -100,7 +100,9 @@ def verificar_pwd(pwd: str, hashed: str) -> bool:
 # ════════════════════════════════════════════════════════════════════════════
 class TokenResponse(BaseModel):
     access_token: str
-    token_type: str
+    token: Optional[str] = None
+    success: Optional[bool] = True
+    token_type: str = "bearer"
     usuario: dict
 
 
@@ -315,12 +317,16 @@ async def login(
     })
     return {
         "access_token": token,
+        "token": token,
         "token_type": "bearer",
+        "success": True,
         "usuario": {
             "id": row["id"],
             "username": row["username"],
+            "usuario": row["username"],
             "rol": row["rol"],
-            "nombre": row["nombre"]
+            "nombre": row["nombre"],
+            "token": token
         }
     }
 
