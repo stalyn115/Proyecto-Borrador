@@ -15,7 +15,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, status, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from jose import JWTError, jwt
@@ -122,6 +122,31 @@ class ReporteFiltros(BaseModel):
     fecha_desde: Optional[str] = ""   # dd/mm/yyyy
     fecha_hasta: Optional[str] = ""
     socio_id:    Optional[int] = None
+
+
+class TaxiConectar(BaseModel):
+    unidad: str
+    socio_nombre: Optional[str] = ""
+    telefono: Optional[str] = ""
+    latitud: Optional[float] = 0.0
+    longitud: Optional[float] = 0.0
+
+
+class TaxiGPS(BaseModel):
+    unidad: str
+    latitud: float
+    longitud: float
+
+
+class TaxiUnidad(BaseModel):
+    unidad: str
+
+
+class TaxiAlerta(BaseModel):
+    unidad: str
+    socio_nombre: Optional[str] = ""
+    latitud: Optional[float] = 0.0
+    longitud: Optional[float] = 0.0
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -639,6 +664,424 @@ def estadisticas(payload: dict = Depends(verificar_token)):
         "sanciones_vigentes": sanciones,
         "vehiculos_actuales": vehs
     }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MÓDULO TAXIS — RASTREO GPS Y BOTÓN DE PÁNICO (APP MÓVIL)
+# ════════════════════════════════════════════════════════════════════════════
+
+@app.post("/taxi/conectar", tags=["Taxi Movil"])
+def taxi_conectar(data: TaxiConectar):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS taxis_en_linea (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        unidad TEXT UNIQUE,
+        socio_nombre TEXT,
+        telefono TEXT,
+        estado TEXT DEFAULT 'CONECTADO',
+        latitud REAL,
+        longitud REAL,
+        ultima_actualizacion TEXT,
+        solicitud_desconexion INTEGER DEFAULT 0,
+        alerta_activa INTEGER DEFAULT 0,
+        alerta_fecha TEXT
+    )""")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("""INSERT INTO taxis_en_linea 
+                 (unidad, socio_nombre, telefono, estado, latitud, longitud, ultima_actualizacion, solicitud_desconexion, alerta_activa)
+                 VALUES (?, ?, ?, 'CONECTADO', ?, ?, ?, 0, 0)
+                 ON CONFLICT(unidad) DO UPDATE SET
+                 socio_nombre=excluded.socio_nombre,
+                 telefono=excluded.telefono,
+                 estado='CONECTADO',
+                 latitud=excluded.latitud,
+                 longitud=excluded.longitud,
+                 ultima_actualizacion=excluded.ultima_actualizacion,
+                 solicitud_desconexion=0,
+                 alerta_activa=0""",
+              (data.unidad, data.socio_nombre, data.telefono, data.latitud, data.longitud, now_str))
+    conn.commit(); conn.close()
+    return {"status": "ok", "mensaje": f"Unidad {data.unidad} conectada a la matriz"}
+
+@app.post("/taxi/gps", tags=["Taxi Movil"])
+def taxi_actualizar_gps(data: TaxiGPS):
+    conn = get_conn(); c = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("""UPDATE taxis_en_linea SET latitud=?, longitud=?, ultima_actualizacion=?
+                 WHERE unidad=?""", (data.latitud, data.longitud, now_str, data.unidad))
+    c.execute("""SELECT estado, solicitud_desconexion, alerta_activa FROM taxis_en_linea WHERE unidad=?""",
+              (data.unidad,))
+    row = c.fetchone()
+    conn.commit(); conn.close()
+
+    desconexion_aprobada = False
+    alerta_activa = False
+    if row:
+        desconexion_aprobada = (row["estado"] == "DESCONECTADO")
+        alerta_activa = bool(row["alerta_activa"])
+
+    return {
+        "status": "ok",
+        "desconexion_aprobada": desconexion_aprobada,
+        "alerta_activa": alerta_activa
+    }
+
+@app.post("/taxi/solicitar-desconexion", tags=["Taxi Movil"])
+def taxi_solicitar_desconexion(data: TaxiUnidad):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("""UPDATE taxis_en_linea SET solicitud_desconexion=1 WHERE unidad=?""", (data.unidad,))
+    conn.commit(); conn.close()
+    return {"status": "ok", "mensaje": "Solicitud enviada a la matriz"}
+
+@app.post("/taxi/aprobar-desconexion", tags=["Taxi Movil"])
+def taxi_aprobar_desconexion(data: TaxiUnidad):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("""UPDATE taxis_en_linea SET estado='DESCONECTADO', solicitud_desconexion=0 WHERE unidad=?""", (data.unidad,))
+    conn.commit(); conn.close()
+    return {"status": "ok", "mensaje": f"Desconexión aprobada para {data.unidad}"}
+
+@app.post("/taxi/alerta", tags=["Taxi Movil"])
+def taxi_disparar_alerta(data: TaxiAlerta):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS alertas_emergencia (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        unidad TEXT,
+        socio_nombre TEXT,
+        latitud REAL,
+        longitud REAL,
+        fecha_hora TEXT,
+        estado TEXT DEFAULT 'ACTIVA'
+    )""")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("""UPDATE taxis_en_linea SET alerta_activa=1, alerta_fecha=? WHERE unidad=?""",
+              (now_str, data.unidad))
+    c.execute("""INSERT INTO alertas_emergencia (unidad, socio_nombre, latitud, longitud, fecha_hora, estado)
+                 VALUES (?, ?, ?, ?, ?, 'ACTIVA')""",
+              (data.unidad, data.socio_nombre, data.latitud, data.longitud, now_str))
+    conn.commit(); conn.close()
+    return {"status": "alerta_activa", "unidad": data.unidad, "fecha_hora": now_str}
+
+@app.post("/taxi/cancelar-alerta", tags=["Taxi Movil"])
+def taxi_cancelar_alerta(data: TaxiUnidad):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("""UPDATE taxis_en_linea SET alerta_activa=0 WHERE unidad=?""", (data.unidad,))
+    c.execute("""UPDATE alertas_emergencia SET estado='FALSA_ALARMA' WHERE unidad=? AND estado='ACTIVA'""", (data.unidad,))
+    conn.commit(); conn.close()
+    return {"status": "ok", "mensaje": "Alerta cancelada"}
+
+@app.get("/taxi/monitoreo", tags=["Taxi Movil"])
+def taxi_monitoreo():
+    conn = get_conn(); c = conn.cursor()
+    try:
+        taxis = [dict(r) for r in c.execute("SELECT * FROM taxis_en_linea ORDER BY id DESC").fetchall()]
+        alertas = [dict(r) for r in c.execute("SELECT * FROM alertas_emergencia WHERE estado='ACTIVA' ORDER BY id DESC").fetchall()]
+    except Exception:
+        taxis = []
+        alertas = []
+    conn.close()
+    return {"taxis": taxis, "alertas_activas": alertas}
+
+@app.get("/app", response_class=HTMLResponse, tags=["Taxi Movil"])
+def web_app_movil():
+    """Aplicación Móvil Web Progresiva (PWA) interactiva para teléfonos y radios Android."""
+    return """<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Taxi Seguro Aguarico</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    body { background: #0f2746; color: #fff; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    
+    /* Header */
+    header { background: #162d50; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); }
+    .title { font-weight: bold; font-size: 16px; color: #fff; display: flex; align-items: center; gap: 8px; }
+    .btn-camuflaje { background: #1e3a5f; border: none; color: #b0bec5; padding: 6px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+    
+    /* Main Content */
+    .container { flex: 1; padding: 18px; display: flex; flex-direction: column; justify-content: space-between; max-width: 480px; margin: 0 auto; width: 100%; overflow-y: auto; }
+    
+    /* Status Card */
+    .card { background: #1e3a5f; border-radius: 16px; padding: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    .status-badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: bold; letter-spacing: 0.5px; margin-bottom: 8px; }
+    .badge-on { background: #27ae60; color: #fff; }
+    .badge-off { background: #c0392b; color: #fff; }
+    .badge-wait { background: #f39c12; color: #fff; }
+    
+    .driver-name { font-size: 18px; font-weight: bold; }
+    .taxi-unit { font-size: 14px; color: #b0bec5; }
+    .gps-info { font-size: 12px; color: #64b5f6; margin-top: 8px; }
+
+    /* Action Buttons */
+    .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+    .btn { padding: 14px; border: none; border-radius: 12px; font-weight: bold; font-size: 14px; cursor: pointer; transition: 0.2s; }
+    .btn-connect { background: #27ae60; color: #fff; }
+    .btn-disconnect { background: #e67e22; color: #fff; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* PANIC BUTTON */
+    .panic-container { display: flex; flex-direction: column; align-items: center; justify-content: center; margin: 20px 0; }
+    .panic-btn { width: 190px; height: 190px; border-radius: 50%; background: radial-gradient(circle, #ff1744 0%, #b71c1c 100%); border: 6px solid rgba(255,255,255,0.2); box-shadow: 0 0 40px rgba(255, 23, 68, 0.6); display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; user-select: none; transition: transform 0.1s; }
+    .panic-btn:active { transform: scale(0.95); }
+    .panic-title { font-size: 26px; font-weight: 900; letter-spacing: 2px; }
+    .panic-sub { font-size: 11px; opacity: 0.8; margin-top: 4px; }
+
+    /* Emergency Modal Countdown */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.92); display: none; flex-direction: column; align-items: center; justify-content: center; padding: 24px; z-index: 999; }
+    .countdown { font-size: 96px; font-weight: 900; color: #ff1744; margin: 20px 0; }
+    .cancel-btn { background: #fff; color: #b71c1c; font-size: 18px; font-weight: bold; padding: 16px 32px; border-radius: 30px; border: none; cursor: pointer; }
+
+    /* Calculator Camouflage Mode */
+    #calc-screen { position: fixed; inset: 0; background: #000; display: none; flex-direction: column; z-index: 1000; }
+    .calc-disp { flex: 1; display: flex; align-items: flex-end; justify-content: flex-end; padding: 30px; font-size: 54px; color: #fff; }
+    .calc-pad { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 16px; }
+    .c-btn { background: #333; color: #fff; border: none; padding: 20px; font-size: 22px; border-radius: 16px; cursor: pointer; }
+    .c-btn.op { background: #f39c12; }
+  </style>
+</head>
+<body>
+
+  <!-- App Header -->
+  <header>
+    <div class="title">🚗 Taxi Seguro</div>
+    <button class="btn-camuflaje" onclick="toggleCamuflaje(true)">🧮 Modo Oculto</button>
+  </header>
+
+  <!-- App Body -->
+  <div class="container">
+    <div class="card">
+      <span id="badge" class="status-badge badge-off">DESCONECTADO</span>
+      <div class="driver-name" id="disp-driver">Jorge Stalyn Enríquez</div>
+      <div class="taxi-unit" id="disp-unit">Unidad: <b>Taxi-10</b></div>
+      <div class="gps-info" id="disp-gps">🛰️ GPS: Obteniendo ubicación...</div>
+      
+      <div class="btn-grid">
+        <button id="btn-conectar" class="btn btn-connect" onclick="conectarTurno()">CONECTAR</button>
+        <button id="btn-desconectar" class="btn btn-disconnect" onclick="solicitarDesconexion()" disabled>DESCONECTAR</button>
+      </div>
+    </div>
+
+    <!-- BOTÓN DE PÁNICO -->
+    <div class="panic-container">
+      <div class="panic-btn" onclick="iniciarAlerta()">
+        <span class="panic-title">PÁNICO</span>
+        <span class="panic-sub">TOCA EN EMERGENCIA</span>
+      </div>
+    </div>
+
+    <div style="text-align: center; color: rgba(255,255,255,0.5); font-size: 12px; margin-bottom: 8px;">
+      Sistema de Seguridad Aguarico · Conexión Matriz
+    </div>
+  </div>
+
+  <!-- Countdown Modal -->
+  <div id="modal-panic" class="modal-overlay">
+    <h2 style="color: #ff1744; font-size: 24px; text-align: center;">¡ALERTA DE EMERGENCIA ACTIVADA!</h2>
+    <p style="color: #ccc; font-size: 14px; margin-top: 8px; text-align: center;">Transmitiendo a la Matriz y grupos en:</p>
+    <div id="timer-val" class="countdown">10</div>
+    <button id="cancel-btn" class="cancel-btn" onclick="cancelarDobleToque()">CANCELAR (Toca 2 veces)</button>
+    <p id="cancel-hint" style="color: #aaa; font-size: 12px; margin-top: 14px;">Si fue una falsa alarma, toca 2 veces seguidas.</p>
+  </div>
+
+  <!-- Camouflage Mode (Calculadora) -->
+  <div id="calc-screen">
+    <div style="padding: 14px 18px; color: #666; font-size: 13px;">Calculadora</div>
+    <div id="c-display" class="calc-disp">0</div>
+    <div class="calc-pad">
+      <button class="c-btn" onclick="calcPress('C')">C</button>
+      <button class="c-btn" onclick="calcPress('+/-')">+/-</button>
+      <button class="c-btn" onclick="calcPress('%')">%</button>
+      <button class="c-btn op" onclick="calcPress('/')">÷</button>
+      <button class="c-btn" onclick="calcPress('7')">7</button>
+      <button class="c-btn" onclick="calcPress('8')">8</button>
+      <button class="c-btn" onclick="calcPress('9')">9</button>
+      <button class="c-btn op" onclick="calcPress('*')">×</button>
+      <button class="c-btn" onclick="calcPress('4')">4</button>
+      <button class="c-btn" onclick="calcPress('5')">5</button>
+      <button class="c-btn" onclick="calcPress('6')">6</button>
+      <button class="c-btn op" onclick="calcPress('-')">-</button>
+      <button class="c-btn" onclick="calcPress('1')">1</button>
+      <button class="c-btn" onclick="calcPress('2')">2</button>
+      <button class="c-btn" onclick="calcPress('3')">3</button>
+      <button class="c-btn op" onclick="calcPress('+')">+</button>
+      <button class="c-btn" style="grid-column: span 2;" onclick="calcPress('0')">0</button>
+      <button class="c-btn" onclick="calcPress('.')">.</button>
+      <button class="c-btn op" onclick="calcPress('=')">=</button>
+    </div>
+  </div>
+
+  <script>
+    let unidad = "Taxi-10";
+    let conductor = "Jorge Stalyn Enríquez";
+    let telefono = "0963178853";
+    let conectado = false;
+    let esperandoDesconexion = false;
+    let lat = -0.22985, lng = -78.52495;
+    let countdownTimer = null;
+    let secondsLeft = 10;
+    let cancelTaps = 0;
+    let calcInput = "";
+
+    // Iniciar GPS Real
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition((pos) => {
+        lat = pos.coords.latitude;
+        lng = pos.coords.longitude;
+        document.getElementById("disp-gps").innerText = `🛰️ GPS: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      }, () => {
+        document.getElementById("disp-gps").innerText = `🛰️ GPS: Simulado (${lat}, ${lng})`;
+      });
+    }
+
+    // Intervalo de transmisión a la Matriz
+    setInterval(() => {
+      if (conectado) {
+        fetch("/taxi/gps", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ unidad, latitud: lat, longitud: lng })
+        })
+        .then(r => r.json())
+        .then(data => {
+          if (data.desconexion_aprobada) {
+            conectado = false;
+            esperandoDesconexion = false;
+            actualizarUI();
+            alert("La Matriz ha aprobado tu fin de turno. Desconectado.");
+          }
+        }).catch(() => {});
+      }
+    }, 5000);
+
+    function actualizarUI() {
+      const badge = document.getElementById("badge");
+      const btnConectar = document.getElementById("btn-conectar");
+      const btnDesconectar = document.getElementById("btn-desconectar");
+
+      if (conectado) {
+        if (esperandoDesconexion) {
+          badge.className = "status-badge badge-wait";
+          badge.innerText = "ESPERANDO APROBACIÓN MATRIZ";
+          btnDesconectar.innerText = "SOLICITADO...";
+          btnDesconectar.disabled = true;
+        } else {
+          badge.className = "status-badge badge-on";
+          badge.innerText = "EN SERVICIO / CONECTADO";
+          btnDesconectar.innerText = "DESCONECTAR";
+          btnDesconectar.disabled = false;
+        }
+        btnConectar.disabled = true;
+      } else {
+        badge.className = "status-badge badge-off";
+        badge.innerText = "DESCONECTADO";
+        btnConectar.disabled = false;
+        btnDesconectar.disabled = true;
+      }
+    }
+
+    function conectarTurno() {
+      fetch("/taxi/conectar", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ unidad, socio_nombre: conductor, telefono, latitud: lat, longitud: lng })
+      }).then(() => {
+        conectado = true;
+        esperandoDesconexion = false;
+        actualizarUI();
+      });
+    }
+
+    function solicitarDesconexion() {
+      fetch("/taxi/solicitar-desconexion", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ unidad })
+      }).then(() => {
+        esperandoDesconexion = true;
+        actualizarUI();
+        alert("Para tu seguridad, la desconexión requiere autorización de la Matriz. Esperando...");
+      });
+    }
+
+    function iniciarAlerta() {
+      if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+      secondsLeft = 10;
+      cancelTaps = 0;
+      document.getElementById("timer-val").innerText = secondsLeft;
+      document.getElementById("cancel-btn").innerText = "CANCELAR (Toca 2 veces)";
+      document.getElementById("modal-panic").style.display = "flex";
+
+      clearInterval(countdownTimer);
+      countdownTimer = setInterval(() => {
+        secondsLeft--;
+        document.getElementById("timer-val").innerText = secondsLeft;
+        if (secondsLeft <= 0) {
+          clearInterval(countdownTimer);
+          confirmarAlerta();
+        }
+      }, 1000);
+    }
+
+    function cancelarDobleToque() {
+      cancelTaps++;
+      if (cancelTaps >= 2) {
+        clearInterval(countdownTimer);
+        document.getElementById("modal-panic").style.display = "none";
+        fetch("/taxi/cancelar-alerta", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ unidad })
+        });
+        alert("Alerta cancelada (Falsa alarma registrada).");
+      } else {
+        document.getElementById("cancel-btn").innerText = "¡TOCA OTRA VEZ!";
+      }
+    }
+
+    function confirmarAlerta() {
+      document.getElementById("modal-panic").style.display = "none";
+      fetch("/taxi/alerta", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ unidad, socio_nombre: conductor, latitud: lat, longitud: lng })
+      }).then(() => {
+        alert("¡ALERTA TRANSMITIDA A LA MATRIZ Y GRUPOS DE AUXILIO!");
+      });
+    }
+
+    // Modo Camuflaje (Calculadora)
+    function toggleCamuflaje(show) {
+      document.getElementById("calc-screen").style.display = show ? "flex" : "none";
+    }
+
+    function calcPress(val) {
+      const disp = document.getElementById("c-display");
+      if (val === 'C') {
+        calcInput = "";
+        disp.innerText = "0";
+      } else if (val === '=') {
+        if (calcInput === "1234") {
+          toggleCamuflaje(false);
+          calcInput = "";
+          return;
+        }
+        if (calcInput === "911" || calcInput === "9999") {
+          confirmarAlerta();
+          disp.innerText = "Error";
+          calcInput = "";
+          return;
+        }
+        disp.innerText = "0";
+        calcInput = "";
+      } else {
+        calcInput += val;
+        disp.innerText = calcInput;
+      }
+    }
+  </script>
+</body>
+</html>"""
 
 
 # ════════════════════════════════════════════════════════════════════════════
