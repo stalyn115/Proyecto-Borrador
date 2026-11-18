@@ -2,9 +2,9 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class ApiService {
-  // ── URL permanente en Render.com / Local ────────────────────────────────────
-  static const String baseUrl = 'https://aguarico-backend.onrender.com';
-  // ────────────────────────────────────────────────────────────────────────────
+  // ── URL permanente en Render.com ─────────────────────────────────────────
+  static const String baseUrl = 'https://proyecto-borrador.onrender.com';
+  // ────────────────────────────────────────────────────────────────────────
 
   /// Headers comunes para todas las peticiones
   static Map<String, String> _headers({String? token}) {

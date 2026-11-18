@@ -106,8 +106,10 @@ class TokenResponse(BaseModel):
 
 class LoginRequest(BaseModel):
     """Login vía JSON — usado por la app móvil."""
-    username: str
-    password: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    usuario:  Optional[str] = None
+    clave:    Optional[str] = None
 
 
 class AsistenciaQR(BaseModel):
@@ -288,15 +290,15 @@ async def login(
     Devuelve JWT Bearer token.
     """
     # Resolver credenciales según el formato recibido
-    user = (data.username if data else username) or ""
-    pwd  = (data.password if data else password) or ""
+    user = (data.username or data.usuario if data else username) or ""
+    pwd  = (data.password or data.clave   if data else password) or ""
 
     if not user or not pwd:
         raise HTTPException(status_code=422, detail="username y password son requeridos")
 
     conn = get_conn(); c = conn.cursor()
     c.execute("""SELECT id, username, rol, nombre, password
-                 FROM usuarios WHERE username=?""", (user,))
+                 FROM usuarios WHERE LOWER(username)=LOWER(?)""", (user,))
     row = c.fetchone(); conn.close()
 
     if not row:

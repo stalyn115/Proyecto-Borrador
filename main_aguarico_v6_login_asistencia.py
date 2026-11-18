@@ -162,20 +162,22 @@ def hash_pwd_sha(pwd: str) -> str:
     """Hash SHA-256 legacy."""
     return hashlib.sha256(pwd.encode()).hexdigest()
 
-def verificar_pwd(pwd: str, hashed: str) -> bool:
-    if not hashed:
-        return False
-    # Verificación directa nativa
-    if hashed == hash_pwd(pwd):
-        return True
-    # Alternativa común admin123
-    if pwd in ("admin123", "1234") and hashed in (hash_pwd("1234"), hash_pwd("admin123")):
-        return True
-    if WERKZEUG_OK and (hashed.startswith('pbkdf2:') or hashed.startswith('scrypt:')):
-        try:
-            return check_password_hash(hashed, pwd)
-        except Exception:
-            pass
+
+def _check_scrypt_builtin(pwd: str, hashed: str) -> bool:
+    """Verifica hash scrypt usando hashlib nativo sin necesidad de Werkzeug."""
+    try:
+        parts = hashed.split('$')
+        if len(parts) == 3 and parts[0].startswith('scrypt:'):
+            params = parts[0].split(':')
+            n = int(params[1])
+            r = int(params[2])
+            p = int(params[3])
+            salt = parts[1].encode('utf-8')
+            expected = parts[2]
+            computed = hashlib.scrypt(pwd.encode('utf-8'), salt=salt, n=n, r=r, p=p, maxmem=67108864).hex()
+            return computed == expected
+    except Exception:
+        pass
     return False
 
 
@@ -187,14 +189,18 @@ def hash_pwd(pwd: str) -> str:
 
 
 def verificar_pwd(pwd: str, hashed: str) -> bool:
-    """Verifica contraseña soportando Werkzeug (scrypt, pbkdf2), SHA-256 legacy y texto plano."""
+    """Verifica contraseña soportando Werkzeug (scrypt, pbkdf2), scrypt nativo, SHA-256 y texto plano."""
     if not hashed or not pwd:
         return False
     if WERKZEUG_OK and (hashed.startswith('pbkdf2:') or hashed.startswith('scrypt:') or hashed.startswith('argon2:')):
         try:
-            return check_password_hash(hashed, pwd)
+            if check_password_hash(hashed, pwd):
+                return True
         except Exception:
             pass
+    if hashed.startswith('scrypt:'):
+        if _check_scrypt_builtin(pwd, hashed):
+            return True
     return (hashed == hash_pwd_sha(pwd)) or (hashed == pwd)
 
 
