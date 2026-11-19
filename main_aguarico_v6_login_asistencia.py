@@ -866,6 +866,7 @@ class MainApp(tk.Tk):
             ("⚠️  Sanciones",     self.show_sanciones),
             ("📊  Reportes",      self.show_reportes),
             ("👥  Usuarios",      self.show_usuarios),
+            ("📡  Monitoreo GPS", self.show_monitoreo_gps),
         ]
         for texto, cmd in menus:
             tk.Button(
@@ -1815,6 +1816,341 @@ class MainApp(tk.Tk):
             c.execute("DELETE FROM usuarios WHERE id=?", (uid,))
             conn.commit(); conn.close()
             self._cargar_usuarios()
+
+    def show_monitoreo_gps(self):
+        self._clear()
+        MonitoreoGPSFrame(self._content, self)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# MONITOREO GPS — FRAME EMBEBIDO
+# ════════════════════════════════════════════════════════════════════════════
+try:
+    import tkintermapview
+    MAPVIEW_OK = True
+except ImportError:
+    MAPVIEW_OK = False
+
+import json as _json
+import urllib.request as _ureq
+
+
+class MonitoreoGPSFrame:
+    """
+    Panel embebido en self._content que muestra:
+    - Mapa con marcadores de cada unidad conectada (verde = ok, rojo = alerta SOS)
+    - Lista lateral con estado, coordenadas y tiempo de última señal
+    - Alertas SOS resaltadas con sonido visual y botón para aprobar desconexión
+    Se actualiza automáticamente cada 5 segundos consultando /taxi/monitoreo.
+    """
+    API_BASE = "http://127.0.0.1:8000"
+    INTERVALO_MS = 5000  # 5 segundos
+
+    def __init__(self, parent: tk.Frame, app: tk.Tk):
+        self._app = app
+        self._after_id = None
+        self._markers: dict[str, object] = {}   # unidad -> marker
+        self._alerta_blink = False
+
+        # Frame raíz que ocupa todo el contenido
+        self._root = tk.Frame(parent, bg=BG)
+        self._root.pack(fill="both", expand=True)
+
+        self._build_ui()
+        self._actualizar()   # primera carga inmediata
+
+    # ── Construcción de la UI ─────────────────────────────────────────────
+    def _build_ui(self):
+        # Cabecera
+        hdr = tk.Frame(self._root, bg=PANEL, height=42)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="📡  MONITOREO GPS EN TIEMPO REAL",
+                 bg=PANEL, fg=ACCENT, font=FB, anchor="w").pack(side="left", padx=14)
+        self._lbl_estado = tk.Label(hdr, text="🔄 Cargando...",
+                                    bg=PANEL, fg=SUBTEXT, font=FS)
+        self._lbl_estado.pack(side="right", padx=14)
+        tk.Button(hdr, text="⟳ Actualizar ahora", command=self._actualizar,
+                  bg=ACCENT, fg=TEXT, font=FS, relief="flat",
+                  cursor="hand2", padx=8, pady=3
+                  ).pack(side="right", padx=6)
+
+        # Cuerpo: mapa izquierda + panel derecha
+        body = tk.Frame(self._root, bg=BG)
+        body.pack(fill="both", expand=True)
+
+        # ── Mapa ──────────────────────────────────────────────────────────
+        mapa_frame = tk.Frame(body, bg=BG)
+        mapa_frame.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+
+        if MAPVIEW_OK:
+            self._mapa = tkintermapview.TkinterMapView(
+                mapa_frame, corner_radius=8)
+            self._mapa.pack(fill="both", expand=True)
+            # Ecuador — centro inicial
+            self._mapa.set_position(-0.22985, -78.52495)
+            self._mapa.set_zoom(13)
+        else:
+            tk.Label(mapa_frame,
+                     text="⚠️  tkintermapview no instalado.\nEjecuta: pip install tkintermapview",
+                     bg=BG, fg=WARN, font=FB, justify="center").pack(expand=True)
+            self._mapa = None
+
+        # ── Panel derecho ─────────────────────────────────────────────────
+        panel = tk.Frame(body, bg=PANEL, width=320)
+        panel.pack(side="right", fill="y", padx=6, pady=6)
+        panel.pack_propagate(False)
+
+        # Título panel
+        tk.Label(panel, text="🚗  Unidades activas",
+                 bg=PANEL, fg=TEXT, font=FB, anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+
+        # Contador
+        self._lbl_contadores = tk.Label(
+            panel, text="Conectados: 0  |  Alertas: 0",
+            bg=PANEL, fg=SUBTEXT, font=FS, anchor="w")
+        self._lbl_contadores.pack(fill="x", padx=10, pady=(0, 6))
+
+        # Lista de unidades
+        cols = ("Unidad", "Socio", "Estado", "Última señal")
+        self._tree = ttk.Treeview(panel, columns=cols, show="headings", height=14)
+        for c in cols:
+            self._tree.heading(c, text=c)
+        self._tree.column("Unidad",      width=80,  anchor="center")
+        self._tree.column("Socio",       width=110, anchor="w")
+        self._tree.column("Estado",      width=70,  anchor="center")
+        self._tree.column("Última señal",width=90,  anchor="center")
+        self._tree.tag_configure("alerta",  background="#7a0000", foreground="#ffffff")
+        self._tree.tag_configure("ok",      background=PANEL,     foreground=TEXT)
+        self._tree.tag_configure("desc",    background="#1a1a1a", foreground=SUBTEXT)
+        sb = ttk.Scrollbar(panel, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=sb.set)
+        self._tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=4)
+        sb.pack(side="left", fill="y", pady=4)
+
+        # Doble clic → centrar en el mapa
+        self._tree.bind("<Double-1>", self._centrar_en_mapa)
+
+        # Separador y sección de alertas SOS
+        tk.Frame(panel, bg=DANGER, height=2).pack(fill="x", padx=10, pady=(6, 2))
+        tk.Label(panel, text="🚨  Alertas SOS activas",
+                 bg=PANEL, fg=DANGER, font=FB, anchor="w").pack(fill="x", padx=10)
+
+        self._lista_alertas = tk.Listbox(
+            panel, bg="#300000", fg="#ff6b6b",
+            font=FS, height=6, relief="flat",
+            selectbackground=DANGER, activestyle="none")
+        self._lista_alertas.pack(fill="x", padx=10, pady=(4, 2))
+
+        # Botones de acción
+        btns = tk.Frame(panel, bg=PANEL)
+        btns.pack(fill="x", padx=10, pady=6)
+        tk.Button(btns, text="✅ Aprobar desconexión",
+                  command=self._aprobar_desconexion,
+                  bg=SUCCESS, fg=TEXT, font=FS, relief="flat",
+                  cursor="hand2", padx=6, pady=4
+                  ).pack(fill="x", pady=2)
+        tk.Button(btns, text="🗺️ Centrar mapa en alerta",
+                  command=self._centrar_alerta,
+                  bg=DANGER, fg=TEXT, font=FS, relief="flat",
+                  cursor="hand2", padx=6, pady=4
+                  ).pack(fill="x", pady=2)
+
+    # ── Lógica de actualización ───────────────────────────────────────────
+    def _fetch_monitoreo(self):
+        """Consulta /taxi/monitoreo — retorna dict o None si falla."""
+        try:
+            req = _ureq.Request(
+                f"{self.API_BASE}/taxi/monitoreo",
+                headers={"Accept": "application/json"})
+            with _ureq.urlopen(req, timeout=4) as r:
+                return _json.loads(r.read().decode())
+        except Exception:
+            return None
+
+    def _actualizar(self):
+        """Lanza la consulta en un hilo y programa la siguiente."""
+        # Cancelar ciclo anterior si existe
+        if self._after_id:
+            try:
+                self._app.after_cancel(self._after_id)
+            except Exception:
+                pass
+
+        def _worker():
+            datos = self._fetch_monitoreo()
+            # Volver a la UI thread
+            try:
+                self._app.after(0, lambda: self._refrescar_ui(datos))
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _programar_siguiente(self):
+        """Programa el próximo ciclo de actualización."""
+        try:
+            self._after_id = self._app.after(self.INTERVALO_MS, self._actualizar)
+        except Exception:
+            pass
+
+    def _refrescar_ui(self, datos):
+        """Aplica los datos recibidos a la UI (corre en el hilo principal)."""
+        if datos is None:
+            self._lbl_estado.config(
+                text="⚠️ API no disponible", fg=WARN)
+            self._programar_siguiente()
+            return
+
+        taxis   = datos.get("taxis", [])
+        alertas = datos.get("alertas_activas", [])
+
+        ahora = datetime.now()
+        self._lbl_estado.config(
+            text=f"✅ Actualizado {ahora.strftime('%H:%M:%S')}", fg=SUCCESS)
+
+        conectados = sum(1 for t in taxis if t.get("estado") == "CONECTADO")
+        self._lbl_contadores.config(
+            text=f"Conectados: {conectados}  |  Alertas SOS: {len(alertas)}")
+
+        # Alertas visuales si hay SOS
+        if alertas:
+            self._lbl_contadores.config(fg=DANGER)
+        else:
+            self._lbl_contadores.config(fg=SUBTEXT)
+
+        # ── Tabla lateral ─────────────────────────────────────────────────
+        for row in self._tree.get_children():
+            self._tree.delete(row)
+
+        for t in taxis:
+            estado   = t.get("estado", "?")
+            alerta   = bool(t.get("alerta_activa", 0))
+            solicitud = bool(t.get("solicitud_desconexion", 0))
+            ult      = t.get("ultima_actualizacion", "")
+
+            # Calcular hace cuánto
+            try:
+                dt   = datetime.strptime(ult, "%Y-%m-%d %H:%M:%S")
+                diff = int((ahora - dt).total_seconds())
+                if diff < 60:
+                    hace = f"{diff}s"
+                else:
+                    hace = f"{diff // 60}m"
+            except Exception:
+                hace = ult[-8:] if len(ult) >= 8 else ult
+
+            etiqueta_estado = "🚨 SOS" if alerta else ("⏳ Desc..." if solicitud else estado)
+
+            tag = "alerta" if alerta else ("desc" if estado != "CONECTADO" else "ok")
+            self._tree.insert("", "end",
+                              values=(t.get("unidad",""), t.get("socio_nombre",""),
+                                      etiqueta_estado, hace),
+                              tags=(tag,),
+                              iid=t.get("unidad",""))
+
+        # ── Mapa ──────────────────────────────────────────────────────────
+        if self._mapa:
+            # Eliminar marcadores de unidades que ya no están
+            unidades_activas = {t.get("unidad") for t in taxis}
+            for unidad in list(self._markers.keys()):
+                if unidad not in unidades_activas:
+                    try:
+                        self._markers[unidad].delete()
+                    except Exception:
+                        pass
+                    del self._markers[unidad]
+
+            # Agregar / actualizar marcadores
+            for t in taxis:
+                unidad = t.get("unidad", "?")
+                lat    = t.get("latitud")
+                lng    = t.get("longitud")
+                if lat is None or lng is None:
+                    continue
+
+                alerta = bool(t.get("alerta_activa", 0))
+                socio  = t.get("socio_nombre", "")
+                estado = t.get("estado", "?")
+                texto  = f"🚨 SOS\n{unidad}\n{socio}" if alerta else f"🚗 {unidad}\n{socio}\n{estado}"
+                color  = "#FF1744" if alerta else "#00C853"
+
+                # Eliminar marcador anterior para redibujar en nueva posición
+                if unidad in self._markers:
+                    try:
+                        self._markers[unidad].delete()
+                    except Exception:
+                        pass
+
+                marker = self._mapa.set_marker(lat, lng, text=texto,
+                                               marker_color_circle=color,
+                                               marker_color_outside=color)
+                self._markers[unidad] = marker
+
+        # ── Lista de alertas SOS ──────────────────────────────────────────
+        self._lista_alertas.delete(0, "end")
+        for a in alertas:
+            ts   = a.get("fecha_hora", "")[-8:]
+            linea = (f"🚨 {a.get('unidad','')} — {a.get('socio_nombre','')}  "
+                     f"({a.get('latitud',0):.4f}, {a.get('longitud',0):.4f})  {ts}")
+            self._lista_alertas.insert("end", linea)
+
+        self._programar_siguiente()
+
+    # ── Acciones del operador ─────────────────────────────────────────────
+    def _get_unidad_seleccionada(self) -> str | None:
+        sel = self._tree.selection()
+        if not sel:
+            return None
+        return self._tree.item(sel[0])["values"][0]
+
+    def _centrar_en_mapa(self, event=None):
+        """Doble clic en la tabla → centra el mapa en esa unidad."""
+        if not self._mapa:
+            return
+        unidad = self._get_unidad_seleccionada()
+        if unidad and unidad in self._markers:
+            pos = self._markers[unidad].position
+            self._mapa.set_position(pos[0], pos[1])
+            self._mapa.set_zoom(16)
+
+    def _centrar_alerta(self):
+        """Centra el mapa en la primera alerta SOS activa."""
+        if not self._mapa:
+            return
+        # Buscar la primera unidad con alerta en la tabla
+        for iid in self._tree.get_children():
+            tags = self._tree.item(iid)["tags"]
+            if "alerta" in tags:
+                unidad = self._tree.item(iid)["values"][0]
+                if unidad in self._markers:
+                    pos = self._markers[unidad].position
+                    self._mapa.set_position(pos[0], pos[1])
+                    self._mapa.set_zoom(17)
+                    return
+        messagebox.showinfo("Sin alertas", "No hay alertas SOS activas en este momento.")
+
+    def _aprobar_desconexion(self):
+        unidad = self._get_unidad_seleccionada()
+        if not unidad:
+            messagebox.showwarning("Selección", "Selecciona una unidad en la tabla primero.")
+            return
+        if not messagebox.askyesno("Aprobar desconexión",
+                                   f"¿Aprobar fin de turno para {unidad}?"):
+            return
+        try:
+            data = _json.dumps({"unidad": unidad}).encode()
+            req  = _ureq.Request(
+                f"{self.API_BASE}/taxi/aprobar-desconexion",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST")
+            with _ureq.urlopen(req, timeout=5):
+                pass
+            messagebox.showinfo("Listo", f"Desconexión aprobada para {unidad}.")
+            self._actualizar()
+        except Exception as ex:
+            messagebox.showerror("Error", f"No se pudo aprobar:\n{ex}")
 
 
 # ════════════════════════════════════════════════════════════════════════════
