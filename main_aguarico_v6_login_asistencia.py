@@ -1851,6 +1851,7 @@ class MonitoreoGPSFrame:
         self._after_id = None
         self._markers: dict[str, object] = {}   # unidad -> marker
         self._alerta_blink = False
+        self._primera_carga = True   # para hacer auto-zoom al primer taxi
 
         # Frame raíz que ocupa todo el contenido
         self._root = tk.Frame(parent, bg=BG)
@@ -2061,6 +2062,12 @@ class MonitoreoGPSFrame:
                         pass
                     del self._markers[unidad]
 
+            # Buscar si hay alerta SOS activa para auto-zoom inmediato
+            taxi_alerta = next(
+                (t for t in taxis
+                 if bool(t.get("alerta_activa", 0))
+                 and t.get("latitud") and t.get("longitud")), None)
+
             # Agregar / actualizar marcadores
             for t in taxis:
                 unidad = t.get("unidad", "?")
@@ -2086,6 +2093,18 @@ class MonitoreoGPSFrame:
                                                marker_color_circle=color,
                                                marker_color_outside=color)
                 self._markers[unidad] = marker
+
+            # Auto-zoom: alerta SOS tiene prioridad; si no, primera carga va al primer taxi
+            if taxi_alerta:
+                self._mapa.set_position(taxi_alerta["latitud"], taxi_alerta["longitud"])
+                self._mapa.set_zoom(16)
+            elif self._primera_carga and taxis:
+                primer = next((t for t in taxis
+                               if t.get("latitud") and t.get("longitud")), None)
+                if primer:
+                    self._mapa.set_position(primer["latitud"], primer["longitud"])
+                    self._mapa.set_zoom(14)
+                    self._primera_carga = False
 
         # ── Lista de alertas SOS ──────────────────────────────────────────
         self._lista_alertas.delete(0, "end")

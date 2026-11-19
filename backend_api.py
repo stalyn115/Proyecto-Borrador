@@ -782,7 +782,16 @@ def taxi_monitoreo():
     conn = get_conn(); c = conn.cursor()
     try:
         taxis = [dict(r) for r in c.execute("SELECT * FROM taxis_en_linea ORDER BY id DESC").fetchall()]
-        alertas = [dict(r) for r in c.execute("SELECT * FROM alertas_emergencia WHERE estado='ACTIVA' ORDER BY id DESC").fetchall()]
+        # Solo alertas de los últimos 30 minutos con estado ACTIVA
+        # para evitar mostrar historial antiguo como si fueran activas
+        alertas = [dict(r) for r in c.execute(
+            """SELECT ae.* FROM alertas_emergencia ae
+               INNER JOIN taxis_en_linea t ON ae.unidad = t.unidad
+               WHERE ae.estado='ACTIVA'
+                 AND t.alerta_activa = 1
+                 AND ae.fecha_hora >= datetime('now', '-30 minutes', 'localtime')
+               ORDER BY ae.id DESC"""
+        ).fetchall()]
     except Exception:
         taxis = []
         alertas = []
