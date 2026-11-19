@@ -13,6 +13,26 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+subprojects { subproject ->
+    def flutterProps = [
+        compileSdkVersion: 35,
+        minSdkVersion: 21,
+        targetSdkVersion: 35
+    ]
+    subproject.extensions.extraProperties.set("flutter", flutterProps)
+    
+    subproject.plugins.withId("com.android.library") {
+        try {
+            subproject.android.extensions.add("flutter", flutterProps)
+        } catch (Exception e) {}
+    }
+    subproject.plugins.withId("com.android.application") {
+        try {
+            subproject.android.extensions.add("flutter", flutterProps)
+        } catch (Exception e) {}
+    }
+}
+
 tasks.register("clean", Delete) {
     delete rootProject.buildDir
 }

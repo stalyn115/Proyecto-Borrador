@@ -6,9 +6,21 @@ reportes/
 *.log
 venv/
 *.bak
-app_aguarico_movil/build/
+# app_aguarico_movil/build/  <- permitido para APK
 app_aguarico_movil/.dart_tool/
 app_aguarico_movil/.gradle/
 *.zip
+# *.apk  <- permitido en releases/
 venv/
 *.bak
+
+# Ignorar archivos de build EXCEPTO el APK final
+app_aguarico_movil/build/*
+!app_aguarico_movil/build/app/
+!app_aguarico_movil/build/app/outputs/
+!app_aguarico_movil/build/app/outputs/flutter-apk/
+!app_aguarico_movil/build/app/outputs/flutter-apk/app-release.apk
+
+# Permitir la carpeta releases
+!releases/
+!releases/*.apk
