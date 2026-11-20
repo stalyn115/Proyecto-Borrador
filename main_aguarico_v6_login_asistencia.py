@@ -777,7 +777,7 @@ class MainApp(tk.Tk):
         self.bind("<Control-0>",     lambda e: self.set_zoom(100))
 
     def adjust_zoom(self, delta):
-        new_pct = max(70, min(220, self._zoom_pct + delta))
+        new_pct = max(50, min(220, self._zoom_pct + delta))
         self.set_zoom(new_pct)
 
     def set_zoom(self, pct):
@@ -880,6 +880,19 @@ class MainApp(tk.Tk):
         btn(self._sidebar, "🔒  Cerrar Sesión", self._logout,
             bg=DANGER, font=FB, pady=10).pack(fill="x", side="bottom", padx=8, pady=8)
 
+        # Controles de zoom rápido en el sidebar
+        zoom_sb = tk.Frame(self._sidebar, bg=SIDEBAR)
+        zoom_sb.pack(side="bottom", fill="x", padx=8, pady=(0, 4))
+        tk.Label(zoom_sb, text="🔍 Zoom", bg=SIDEBAR, fg=SUBTEXT,
+                 font=FS).pack(side="left", padx=(2, 4))
+        for pct in (50, 75, 100):
+            p = pct  # captura de variable
+            tk.Button(zoom_sb, text=f"{pct}%",
+                      command=lambda v=p: self.set_zoom(v),
+                      bg=CARD, fg=SUBTEXT, font=FS, relief="flat",
+                      cursor="hand2", padx=4, pady=2
+                      ).pack(side="left", padx=2)
+
         self.show_inicio()
 
     def _verificar_api_bg(self):
@@ -937,7 +950,13 @@ class MainApp(tk.Tk):
                 f"uvicorn backend_api:app --host 0.0.0.0 --port 8000")
 
     def _clear(self):
+        # Detener el timer del MonitoreoGPS si está activo antes de destruir widgets
         for w in self._content.winfo_children():
+            if hasattr(w, '_after_id') and w._after_id:
+                try:
+                    self.after_cancel(w._after_id)
+                except Exception:
+                    pass
             w.destroy()
         self._refs.clear()
 
@@ -1856,6 +1875,9 @@ class MonitoreoGPSFrame:
         # Frame raíz que ocupa todo el contenido
         self._root = tk.Frame(parent, bg=BG)
         self._root.pack(fill="both", expand=True)
+        # Exponer _after_id en el frame raíz para que _clear() pueda cancelarlo
+        self._root._after_id = None
+        self._root._monitoreo_ref = self   # referencia al controlador
 
         self._build_ui()
         self._actualizar()   # primera carga inmediata
@@ -2011,6 +2033,13 @@ class MonitoreoGPSFrame:
 
     def _actualizar(self):
         """Lanza la consulta en un hilo y programa la siguiente."""
+        # Si el frame raíz ya fue destruido, detener el ciclo completamente
+        try:
+            if not self._root.winfo_exists():
+                return
+        except Exception:
+            return
+
         # Cancelar ciclo anterior si existe
         if self._after_id:
             try:
@@ -2020,9 +2049,10 @@ class MonitoreoGPSFrame:
 
         def _worker():
             datos = self._fetch_monitoreo()
-            # Volver a la UI thread
             try:
-                self._app.after(0, lambda: self._refrescar_ui(datos))
+                # Verificar de nuevo antes de tocar la UI
+                if self._root.winfo_exists():
+                    self._app.after(0, lambda: self._refrescar_ui(datos))
             except Exception:
                 pass
 
@@ -2032,11 +2062,19 @@ class MonitoreoGPSFrame:
         """Programa el próximo ciclo de actualización."""
         try:
             self._after_id = self._app.after(self.INTERVALO_MS, self._actualizar)
+            self._root._after_id = self._after_id   # sincronizar para _clear()
         except Exception:
             pass
 
     def _refrescar_ui(self, datos):
         """Aplica los datos recibidos a la UI (corre en el hilo principal)."""
+        # Abortar si el panel fue destruido (el usuario navegó a otra sección)
+        try:
+            if not self._root.winfo_exists():
+                return
+        except Exception:
+            return
+
         if datos is None:
             self._lbl_estado.config(
                 text="⚠️ API no disponible", fg=WARN)
