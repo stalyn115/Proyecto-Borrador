@@ -1862,7 +1862,28 @@ class MonitoreoGPSFrame:
 
     # ── Construcción de la UI ─────────────────────────────────────────────
     def _build_ui(self):
-        # Cabecera
+        # ── Barra de configuración de API ─────────────────────────────────
+        cfg = tk.Frame(self._root, bg=SIDEBAR, height=36)
+        cfg.pack(fill="x")
+        cfg.pack_propagate(False)
+        tk.Label(cfg, text="🌐 Servidor API:", bg=SIDEBAR, fg=SUBTEXT,
+                 font=FS).pack(side="left", padx=(10, 4))
+        self._var_api = tk.StringVar(value=self.API_BASE)
+        entry_api = tk.Entry(cfg, textvariable=self._var_api,
+                             bg=ENTRY_BG, fg=TEXT, font=FS,
+                             insertbackground=TEXT, relief="flat", width=46)
+        entry_api.pack(side="left", padx=4, ipady=3)
+        tk.Button(cfg, text="✔ Aplicar", command=self._cambiar_api,
+                  bg=SUCCESS, fg=TEXT, font=FS, relief="flat",
+                  cursor="hand2", padx=6, pady=2).pack(side="left", padx=4)
+        tk.Button(cfg, text="Local", command=lambda: self._set_api("http://127.0.0.1:8000"),
+                  bg=CARD, fg=SUBTEXT, font=FS, relief="flat",
+                  cursor="hand2", padx=5, pady=2).pack(side="left", padx=2)
+        tk.Button(cfg, text="Render", command=lambda: self._set_api("https://proyecto-borrador.onrender.com"),
+                  bg=CARD, fg=SUBTEXT, font=FS, relief="flat",
+                  cursor="hand2", padx=5, pady=2).pack(side="left", padx=2)
+
+        # ── Cabecera de estado ─────────────────────────────────────────────
         hdr = tk.Frame(self._root, bg=PANEL, height=42)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
@@ -1888,7 +1909,11 @@ class MonitoreoGPSFrame:
             self._mapa = tkintermapview.TkinterMapView(
                 mapa_frame, corner_radius=8)
             self._mapa.pack(fill="both", expand=True)
-            # Ecuador — centro inicial
+            # Google Maps Satélite — más detallado y actualizado
+            self._mapa.set_tile_server(
+                "https://mt0.google.com/vt/lyrs=y&hl=es&x={x}&y={y}&z={z}&s=Ga",
+                max_zoom=22)
+            # Centro inicial en Ecuador hasta que lleguen datos reales
             self._mapa.set_position(-0.22985, -78.52495)
             self._mapa.set_zoom(13)
         else:
@@ -1956,6 +1981,21 @@ class MonitoreoGPSFrame:
                   bg=DANGER, fg=TEXT, font=FS, relief="flat",
                   cursor="hand2", padx=6, pady=4
                   ).pack(fill="x", pady=2)
+
+    # ── Configuración dinámica de API ─────────────────────────────────────
+    def _set_api(self, url: str):
+        self._var_api.set(url)
+        self._cambiar_api()
+
+    def _cambiar_api(self):
+        nueva = self._var_api.get().rstrip("/")
+        if not nueva.startswith("http"):
+            messagebox.showwarning("URL inválida", "La URL debe comenzar con http:// o https://")
+            return
+        self.API_BASE = nueva
+        self._primera_carga = True   # re-centrar mapa con la nueva fuente
+        self._lbl_estado.config(text=f"🔄 Conectando a {nueva}...", fg=SUBTEXT)
+        self._actualizar()
 
     # ── Lógica de actualización ───────────────────────────────────────────
     def _fetch_monitoreo(self):
